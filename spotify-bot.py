@@ -74,7 +74,6 @@ async def download_track(track_url):
     
     # Download the audio stream as an MP3 file to the "downloads" directory
     audio.download(filename=f"downloads/{mp3_file_path}")
-    
     # Return the file path of the downloaded MP3 file
     return mp3_file_path
 
@@ -121,7 +120,7 @@ async def welcome(message):
         
 		# Send welcome message to user
     await bot.send_message(message.chat.id,
-			f"Привет, *{message.from_user.first_name}* ! \n Просто пришли сюда ссылку на трек в Spotify!", parse_mode='Markdown')
+			f"Приветик, *{message.from_user.first_name}* ! \n Просто пришли сюда ссылку на трек в Spotify!", parse_mode='Markdown')
 
 # Define a function to process a user message with a Spotify track link
 @dp.message_handler(content_types=ContentType.TEXT)
@@ -142,19 +141,21 @@ async def process_track_link(message: types.Message):
 		with open('downloads/cover.jpg', 'wb') as f:
 			f.write(response.content)
 		thumb = InputFile('downloads/cover.jpg')
+  
+		# Find the track on YouTube and download it
+		youtube_track_url = await search_track_on_youtube(f"{track_name} {artist_name}")
+		mp3_file_path = await download_track(youtube_track_url)
 		# Send the file to the user as an audio message
 		try:
 			with open(f"downloads/{mp3_file_path}", 'rb') as audio_file:
 				await message.answer_audio(audio=audio_file, title=track_name, performer=artist_name, thumb=thumb, disable_notification=True)
+    
     # Handle exceptions that may occur
 		except exceptions.CantParseEntities or exceptions.CantParseUrl:
 			await message.answer('Не удалось обработать аудиофайл. Свяжитесь с @nevermorelove')
 		except Exception as e:
 			await message.answer(f"Произошла ошибка {e}. Свяжитесь с @nevermorelove")
 
-		# Find the track on YouTube and download it
-		youtube_track_url = await search_track_on_youtube(f"{track_name} {artist_name}")
-		mp3_file_path = await download_track(youtube_track_url)
   # If the user message does not contain a link to Spotify
 	else:
 		# Log the message for debugging purposes
