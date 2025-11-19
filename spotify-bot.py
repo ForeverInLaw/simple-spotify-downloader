@@ -82,12 +82,13 @@ def cleanup_logs(path: str, max_age: timedelta) -> None:
     Notes:
         If the file does not exist, the function does nothing.
     """
-    if not os.path.exists(path):
+    log_path = Path(path)
+    if not log_path.exists():
         return
 
-    file_age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(path))
+    file_age = datetime.now() - datetime.fromtimestamp(log_path.stat().st_mtime)
     if file_age > max_age:
-        open(path, 'w', encoding='utf-8').close()
+        log_path.write_text('', encoding='utf-8')
 
 
 cleanup_logs(LOG_FILE, LOG_MAX_AGE)
@@ -217,12 +218,15 @@ async def process_track_link(message: types.Message):
         mp3_path = TRACKS_DIR / f"{track_id}.mp3"
 
         # 2. Handle Cover Art
-        cover_path = COVERS_DIR / f"{track_id}.jpg"
-        if not cover_path.exists():
-            await download_cover_image(track_info['image_url'], cover_path)
-        ensure_cover_constraints(cover_path)
-
-        thumb = FSInputFile(cover_path)
+        thumb: FSInputFile | None = None
+        image_url = track_info.get('image_url')
+        if image_url:
+            cover_path = COVERS_DIR / f"{track_id}.jpg"
+            if not cover_path.exists():
+                await download_cover_image(image_url, cover_path)
+            ensure_cover_constraints(cover_path)
+            if cover_path.exists():
+                thumb = FSInputFile(cover_path)
 
         # 3. Use cache if exists, otherwise search/download
         if mp3_path.exists():
@@ -240,19 +244,23 @@ async def process_track_link(message: types.Message):
 
         # 4. Send Audio
         audio_file = FSInputFile(mp3_path)
-        await message.answer_audio(
-            audio=audio_file, 
-            title=track_name, 
-            performer=artist_name, 
-            thumbnail=thumb
-        )
+        audio_kwargs = {
+            "audio": audio_file,
+            "title": track_name,
+            "performer": artist_name,
+        }
+        if thumb:
+            audio_kwargs['thumbnail'] = thumb
+
+        await message.answer_audio(**audio_kwargs)
 
     except (ClientError, asyncio.TimeoutError) as exc:
-        logging.error(f"Error downloading cover art: {exc}")
+        logging.exception("Error downloading cover art: %s", exc)
         await message.answer("❌ Не удалось загрузить обложку. Попробуйте позже.")
     except Exception as e:
-        logging.error(f"Error processing request: {e}")
+        logging.exception("Error processing request: %s", e)
         await message.answer("❌ Произошла ошибка при обработке. Попробуйте позже.")
+        raise
     finally:
         await delete_status_message()
 

@@ -40,7 +40,7 @@ Telegram bot that converts Spotify track links into MP3 files by resolving track
    TELEGRAM_API_TOKEN=<telegram_bot_token>
    SPOTIFY_CLIENT_ID=<spotify_client_id>
    SPOTIFY_CLIENT_SECRET=<spotify_client_secret>
-   STORAGE_LIMIT_MB=500  # optional
+   STORAGE_LIMIT_MB=500  # optional; omit or leave empty for unlimited cache
    ```
    Environment variables are loaded automatically via `python-dotenv` when `spotify-bot.py` starts.
 
