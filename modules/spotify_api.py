@@ -17,15 +17,33 @@ class SpotifyClient:
         try:
             track_info = self.sp.track(track_id)
 
+            artists = track_info.get('artists', [])
+            album_info = track_info.get('album', {})
+            images = album_info.get('images', []) if isinstance(album_info, dict) else []
+
+            first_artist = artists[0] if artists else {}
+            artist_name = (
+                first_artist.get('name')
+                if isinstance(first_artist, dict)
+                else first_artist
+            )
+
+            first_image = images[0] if images else {}
+            image_url = (
+                first_image.get('url')
+                if isinstance(first_image, dict)
+                else first_image
+            ) or None
+
             return {
                 'id': track_info['id'],
                 'name': track_info['name'],
-                'artist': track_info['artists'][0]['name'],
-                'album': track_info['album']['name'],
-                'image_url': track_info['album']['images'][0]['url']
+                'artist': artist_name or 'Unknown Artist',
+                'album': album_info.get('name') if isinstance(album_info, dict) else None,
+                'image_url': image_url
             }
         except Exception as e:
-            logging.error(f"Error fetching Spotify track info: {e}")
+            logging.exception(f"Error fetching Spotify track info: {e}")
             raise
 
     @staticmethod

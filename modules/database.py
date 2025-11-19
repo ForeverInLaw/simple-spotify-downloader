@@ -4,7 +4,7 @@ import logging
 DB_NAME = 'users.db'
 
 def init_db():
-    """Initializes the database and creates the users table if it doesn't exist."""
+    """Initializes the database and ensures users and tracks tables exist."""
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
@@ -27,8 +27,8 @@ def init_db():
                 )
             ''')
             conn.commit()
-    except sqlite3.Error as e:
-        logging.error(f"Database initialization error: {e}")
+    except sqlite3.Error:
+        logging.exception("Database initialization error")
 
 def add_user(user_id: int, username: str, first_name: str, last_name: str):
     """Adds or updates a user in the database."""
@@ -41,8 +41,8 @@ def add_user(user_id: int, username: str, first_name: str, last_name: str):
             )
             conn.commit()
             logging.info(f"User updated: {username} ({user_id})")
-    except sqlite3.Error as e:
-        logging.error(f"Error adding user {user_id}: {e}")
+    except sqlite3.Error:
+        logging.exception("Error adding user %s", user_id)
 
 
 def upsert_track(track_info: dict):
@@ -64,8 +64,8 @@ def upsert_track(track_info: dict):
                 )
             )
             conn.commit()
-    except sqlite3.Error as e:
-        logging.error(f"Error caching track {track_info.get('id')}: {e}")
+    except sqlite3.Error:
+        logging.exception("Error caching track %s", track_info.get('id'))
 
 
 def get_track(track_id: str):
@@ -87,8 +87,8 @@ def get_track(track_id: str):
                 'album': row[3],
                 'image_url': row[4],
             }
-    except sqlite3.Error as e:
-        logging.error(f"Error reading cached track {track_id}: {e}")
+    except sqlite3.Error:
+        logging.exception("Error reading cached track %s", track_id)
         return None
 
 
@@ -99,5 +99,5 @@ def delete_track(track_id: str) -> None:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM tracks WHERE track_id=?', (track_id,))
             conn.commit()
-    except sqlite3.Error as e:
-        logging.error(f"Error deleting cached track {track_id}: {e}")
+    except sqlite3.Error:
+        logging.exception("Error deleting cached track %s", track_id)
