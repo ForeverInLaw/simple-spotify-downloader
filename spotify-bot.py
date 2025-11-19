@@ -1,174 +1,300 @@
-# Importing necessary modules and packages
-import os                  # For interacting with the operating system
-import logging             # For logging errors and information
-import asyncio             # For asynchronous programming
-import aiohttp             # For making asynchronous HTTP requests
-import spotipy             # For interacting with the Spotify API
-import pytube              # For downloading audio from YouTube videos
-import re                  # For regular expressions
-import requests            # For making HTTP requests
-import sqlite3             # For working with SQLite databases
+import logging
+import asyncio
+import os
+from datetime import datetime, timedelta
+from pathlib import Path
 
-# Importing necessary classes and functions from the aiogram package
-from spotipy.oauth2 import SpotifyClientCredentials
-from aiogram import Bot, Dispatcher, types
-from aiogram.types.message import ContentType
-from aiogram.utils import exceptions
-from aiogram.types import InputFile
+import aiohttp
+from PIL import Image
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import FSInputFile
+from aiogram.exceptions import TelegramNetworkError, TelegramBadRequest
+from aiohttp import ClientError
+from dotenv import load_dotenv
+
+# Import modules
+from modules import database
+from modules.spotify_api import SpotifyClient
+from modules.downloader import Downloader, TRACKS_DIR, COVERS_DIR
+
+load_dotenv()
 
 
-# Importing necessary credentials from the creds module
-from creds import api as API_TOKEN                        # API_TOKEN of Telegram bot (@botfather)
-from creds import client_id as SPOTIPY_CLIENT_ID          # Spotify Client ID for authentication
-from creds import client_secret as SPOTIPY_CLIENT_SECRET  # Spotify Client Secret for authentication
-from creds import botusername as BOT_USERNAME             # Unnecessary shit in console
-from creds import bot_visible as BOT_NAME                 # (2) Unnecessary shit in console
-from creds import yt_api                                  # YouTube API key for accessing the YouTube API
+def get_required_env(var_name: str) -> str:
+    """
+    Retrieve a required environment variable by name.
+    
+    Parameters:
+        var_name (str): Name of the environment variable to read.
+    
+    Returns:
+        str: The environment variable value.
+    
+    Raises:
+        RuntimeError: If the environment variable is not set or is empty.
+    """
+    value = os.getenv(var_name)
+    if not value:
+        raise RuntimeError(f"Environment variable '{var_name}' must be set.")
+    return value
 
-# Initializing a logging system
+
+def get_optional_int_env(var_name: str) -> int | None:
+    """
+    Retrieve an optional integer from the environment by variable name.
+    
+    Parameters:
+        var_name (str): Name of the environment variable to read.
+    
+    Returns:
+        int | None: The integer value if the variable is present and parses as an integer; otherwise `None`.
+    
+    Raises:
+        ValueError: If the environment variable is set but cannot be parsed as an integer.
+    """
+    value = os.getenv(var_name)
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"Environment variable '{var_name}' must be an integer.") from exc
+
+
+TELEGRAM_API_TOKEN = get_required_env("TELEGRAM_API_TOKEN")
+SPOTIFY_CLIENT_ID = get_required_env("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = get_required_env("SPOTIFY_CLIENT_SECRET")
+STORAGE_LIMIT_MB = get_optional_int_env("STORAGE_LIMIT_MB")
+
+LOG_FILE = 'logs.txt'
+LOG_MAX_AGE = timedelta(days=1)
+
+
+def cleanup_logs(path: str, max_age: timedelta) -> None:
+    """
+    Truncates the log file at the given path when its last modification time is older than the specified maximum age.
+    
+    Parameters:
+        path (str): Filesystem path to the log file to check.
+        max_age (timedelta): Maximum allowed age; if the file's age (now - last modification time) is greater than this, the file will be emptied.
+    
+    Notes:
+        If the file does not exist, the function does nothing.
+    """
+    log_path = Path(path)
+    if not log_path.exists():
+        return
+
+    file_age = datetime.now() - datetime.fromtimestamp(log_path.stat().st_mtime)
+    if file_age > max_age:
+        log_path.write_text('', encoding='utf-8')
+
+
+cleanup_logs(LOG_FILE, LOG_MAX_AGE)
+
+
+def ensure_cover_constraints(path: Path | str) -> None:
+    """
+    Ensure a cover image meets Telegram audio thumbnail requirements.
+    
+    If the file exists, converts the image to RGB JPEG and resizes it to at most 320×320 pixels (preserving aspect ratio), overwriting the original file with an optimized JPEG at quality 85. If the file does not exist, the function does nothing.
+    
+    Parameters:
+        path (Path | str): Path to the cover image file.
+    """
+    cover_path = Path(path)
+    if not cover_path.exists():
+        return
+
+    with Image.open(cover_path) as img:
+        img = img.convert('RGB')
+        img.thumbnail((320, 320))
+        img.save(cover_path, format='JPEG', optimize=True, quality=85)
+
+
+async def download_cover_image(url: str, destination: Path) -> None:
+    """
+    Download an image from the given URL and write it to the specified destination path.
+    
+    Parameters:
+        url (str): HTTP(S) URL of the image to download.
+        destination (Path): Filesystem path where the image will be saved; parent directories are created if missing.
+    
+    Raises:
+        asyncio.TimeoutError: If the request does not complete within 15 seconds.
+        aiohttp.ClientResponseError: If the HTTP response status indicates an error.
+        aiohttp.ClientError: For other network-related errors.
+        OSError: If writing the file to disk fails.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    async with asyncio.timeout(15):
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                response.raise_for_status()
+                data = await response.read()
+    destination.write_bytes(data)
+
+
 logging.basicConfig(
-	level=logging.INFO,
-	format='%(asctime)s - %(levelname)s - %(message)s',
-	datefmt='%d-%b-%y %H:%M:%S',
-	handlers=[
-		logging.FileHandler('logs.txt', mode='a', encoding='utf-8'),
-		logging.StreamHandler()
-	]
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%d-%b-%y %H:%M:%S',
+    handlers=[
+        logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
 )
 
-# Bot initialization
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
+# Initialize components
+bot = Bot(token=TELEGRAM_API_TOKEN)
+dp = Dispatcher()
+spotify_client = SpotifyClient(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
+downloader = Downloader(max_storage_mb=STORAGE_LIMIT_MB)
 
-# Spotipy initialization
-client_credentials_manager = SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET)
-sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
+# Initialize DB
+database.init_db()
 
-# Database initialization
-conn = sqlite3.connect('users.db')
-cursor = conn.cursor()
-cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT)''')
-conn.commit()
-
-# Check if a directory named "downloads" exists in the current working directory
-if not os.path.exists('downloads'):
-    # If the directory does not exist, create a new directory named "downloads" 
-    # using the os.makedirs() function
-    os.makedirs('downloads')
-
-
-# Define an asynchronous function named "download_track" that takes a track URL as a parameter
-async def download_track(track_url):
-    # Create a YouTube object using the pytube library and the track URL
-    video = pytube.YouTube(track_url)
+@dp.message(Command('start'))
+async def welcome(message: types.Message):
+    """
+    Register the sender of a Telegram message in the user database and send a localized welcome prompt.
     
-    # Filter the available video streams to get the highest quality audio-only stream
-    audio = video.streams.filter(only_audio=True).order_by('abr').last()
-    
-    # Get the title of the video and remove any forbidden characters from the file name
-    track_title = video.title
-    title = re.sub(r'[\\/*?;"<>|]', ' ', track_title)
-    
-    # Define the file path for the downloaded MP3 file
-    mp3_file_path = f'{title}.mp3'
-    
-    # Download the audio stream as an MP3 file to the "downloads" directory
-    audio.download(filename=f"downloads/{mp3_file_path}")
-    # Return the file path of the downloaded MP3 file
-    return mp3_file_path
+    Parameters:
+        message (aiogram.types.Message): Incoming Telegram message whose sender (id, username, first_name, last_name) will be recorded and who will receive the greeting.
+    """
+    user = message.from_user
+    database.add_user(user.id, user.username, user.first_name, user.last_name)
+    await message.answer(
+        f"Приветик, *{user.first_name}*! \nПросто пришли сюда ссылку на трек в Spotify!", 
+        parse_mode='Markdown'
+    )
 
-
-# Taking a track name as a string parameter and returning a string
-async def search_track_on_youtube(track_name: str) -> str:
-  # Build a search query for the track name
-	query = f"{track_name}"
-	# Create a new client session using the aiohttp library
-	async with aiohttp.ClientSession() as session:
-		# Send an HTTP GET request to the YouTube Data API with the search query and API key
-		async with session.get(f'https://www.googleapis.com/youtube/v3/search?part=snippet&q={query}&key={yt_api}&maxResults=1') as response:
-			# Parse the JSON response from the YouTube Data API
-			response_dict = await response.json()
-			# Extract the video ID of the first search result
-			video_id = response_dict['items'][0]['id']['videoId']
-			# Return the URL of the first search result video on YouTube
-			return f"https://www.youtube.com/watch?v={video_id}"
-
-# Removing any query parameters from the Spotify url
-def clean_spotify_url(url):
-	pattern = r'\?.*$'
-	return re.sub(pattern, '', url)
-
-# Handler for "/start" command
-@dp.message_handler(commands=['start'])
-async def welcome(message):
-		# Connect to the users database
-    with sqlite3.connect('users.db') as conn:
-        cursor = conn.cursor()
-        
-        # Get user information
-        user_id = message.from_user.id
-        username = message.from_user.username
-        first_name = message.from_user.first_name
-        last_name = message.from_user.last_name
-
-				# Print user information to console
-        print(f"User: {username} ({user_id}), {first_name} {last_name}")
-
-				# Insert or replace user information into the users table
-        cursor.execute('INSERT OR REPLACE INTO users(user_id, username, first_name, last_name) VALUES(?,?,?,?)', (user_id, username, first_name, last_name))
-        conn.commit()
-        
-		# Send welcome message to user
-    await bot.send_message(message.chat.id,
-			f"Приветик, *{message.from_user.first_name}* ! \n Просто пришли сюда ссылку на трек в Spotify!", parse_mode='Markdown')
-
-# Define a function to process a user message with a Spotify track link
-@dp.message_handler(content_types=ContentType.TEXT)
+@dp.message(F.text)
 async def process_track_link(message: types.Message):
-  # If the user message contains a link to Spotify
-	if re.match(r'http(s)?://open.spotify.com/', message.text):
-		# Get the Spotify URL from the user message and clean it up
-		spotify_track_url = clean_spotify_url(message.text)
-
-		# Get information about the track from the Spotify API
-		track_id = spotify_track_url.split('/')[-1]
-		track_info = sp.track(track_id)
-		track_name = track_info['name']
-		artist_name = track_info['artists'][0]['name']
-		image_url = track_info['album']['images'][0]['url']
-		response = requests.get(image_url)
-		# Save the album cover image to a file
-		with open('downloads/cover.jpg', 'wb') as f:
-			f.write(response.content)
-		thumb = InputFile('downloads/cover.jpg')
-  
-		# Find the track on YouTube and download it
-		youtube_track_url = await search_track_on_youtube(f"{track_name} {artist_name}")
-		mp3_file_path = await download_track(youtube_track_url)
-		# Send the file to the user as an audio message
-		try:
-			with open(f"downloads/{mp3_file_path}", 'rb') as audio_file:
-				await message.answer_audio(audio=audio_file, title=track_name, performer=artist_name, thumb=thumb, disable_notification=True)
+    """
+    Process an incoming Telegram message that contains a Spotify track link and deliver the corresponding audio to the user.
     
-    # Handle exceptions that may occur
-		except exceptions.CantParseEntities or exceptions.CantParseUrl:
-			await message.answer('Не удалось обработать аудиофайл. Свяжитесь с @nevermorelove')
-		except Exception as e:
-			await message.answer(f"Произошла ошибка {e}. Свяжитесь с @nevermorelove")
+    Parses the Spotify link from the provided message, resolves track metadata (using cache when available), ensures cover art meets thumbnail constraints, downloads the audio from YouTube if not cached, and sends the audio with title, performer, and thumbnail to the chat. Handles network and processing errors by notifying the user and always removes the temporary status message after completion.
+    """
+    if not spotify_client.is_spotify_link(message.text):
+        logging.info(f"{message.date} - {message.chat.id} - {message.text}")
+        return
 
-  # If the user message does not contain a link to Spotify
-	else:
-		# Log the message for debugging purposes
-		logging.info(f"{message.date} - {message.chat.id} - {message.chat.username} - {message.text}")
-  
-'''
-Maybe i should use it for saving space but i wont
-	# removing temp files
-	os.remove(f"downloads/{mp3_file_path}")
-	os.remove(downloads/cover.jpg)
-'''
+    status_msg = await message.answer("🔍 Ищу трек...")
 
-# Is it necessary to comment THIS code?
+    status_deleted = False
+
+    async def delete_status_message() -> None:
+        """
+        Safely deletes the current status message if it has not already been deleted.
+        
+        If deletion fails due to a TelegramBadRequest error, the error is suppressed. Always marks the status as deleted so subsequent calls are no-ops.
+        """
+        nonlocal status_deleted
+        if status_deleted:
+            return
+        try:
+            await status_msg.delete()
+        except TelegramBadRequest:
+            pass
+        finally:
+            status_deleted = True
+
+    try:
+        # 1. Resolve track ID and get metadata (cache first)
+        track_id = spotify_client.extract_track_id(message.text)
+        if not track_id:
+            await message.answer("❌ Не удалось получить ID трека.")
+            return
+
+        track_info = database.get_track(track_id)
+        if not track_info:
+            track_info = spotify_client.get_track_info(track_id)
+            database.upsert_track(track_info)
+
+        track_name = track_info['name']
+        artist_name = track_info['artist']
+        mp3_path = TRACKS_DIR / f"{track_id}.mp3"
+
+        # 2. Handle Cover Art
+        thumb: FSInputFile | None = None
+        image_url = track_info.get('image_url')
+        if image_url:
+            cover_path = COVERS_DIR / f"{track_id}.jpg"
+            if not cover_path.exists():
+                await download_cover_image(image_url, cover_path)
+            ensure_cover_constraints(cover_path)
+            if cover_path.exists():
+                thumb = FSInputFile(cover_path)
+
+        # 3. Use cache if exists, otherwise search/download
+        if mp3_path.exists():
+            await status_msg.edit_text("📤 Отправляю...")
+        else:
+            await status_msg.edit_text(f"📥 Скачиваю: {artist_name} - {track_name}")
+            search_query = f"{artist_name} - {track_name} audio"
+            youtube_url = await downloader.search_youtube(search_query)
+
+            if not youtube_url:
+                await message.answer("❌ Не удалось найти трек на YouTube.")
+                return
+
+            mp3_path = await downloader.download_track(youtube_url, track_id)
+
+        # 4. Send Audio
+        audio_file = FSInputFile(mp3_path)
+        audio_kwargs = {
+            "audio": audio_file,
+            "title": track_name,
+            "performer": artist_name,
+        }
+        if thumb:
+            audio_kwargs['thumbnail'] = thumb
+
+        await message.answer_audio(**audio_kwargs)
+
+    except (ClientError, asyncio.TimeoutError) as exc:
+        logging.exception("Error downloading cover art: %s", exc)
+        await message.answer("❌ Не удалось загрузить обложку. Попробуйте позже.")
+    except Exception as e:
+        logging.exception("Error processing request: %s", e)
+        await message.answer("❌ Произошла ошибка при обработке. Попробуйте позже.")
+        raise
+    finally:
+        await delete_status_message()
+
+async def main():
+    """
+    Start the bot's polling loop and keep it running, retrying on transient Telegram network errors.
+    
+    This coroutine begins long-lived polling of incoming updates for the configured Dispatcher and Bot. If a Telegram network error occurs, polling is retried after a short delay. If the coroutine is cancelled, it logs shutdown intent and re-raises asyncio.CancelledError. The function returns when polling stops normally.
+    """
+    logging.info("Starting bot...")
+    retry_delay = 3
+
+    while True:
+        try:
+            await dp.start_polling(bot)
+        except TelegramNetworkError as exc:
+            logging.warning(
+                "Polling stopped due to Telegram network error: %s. Retrying in %s seconds...",
+                exc,
+                retry_delay,
+            )
+            await asyncio.sleep(retry_delay)
+        except asyncio.CancelledError:
+            logging.info("Polling cancelled. Shutting down gracefully.")
+            raise
+        else:
+            logging.info("Polling finished.")
+            break
+
+
 if __name__ == '__main__':
-	logging.info(f"Starting bot {BOT_NAME} @{BOT_USERNAME}....")
-	asyncio.run(dp.start_polling())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Bot stopped by user.")
+    finally:
+        downloader.close()
