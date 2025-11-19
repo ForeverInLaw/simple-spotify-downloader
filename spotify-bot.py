@@ -22,6 +22,18 @@ load_dotenv()
 
 
 def get_required_env(var_name: str) -> str:
+    """
+    Retrieve a required environment variable by name.
+    
+    Parameters:
+        var_name (str): Name of the environment variable to read.
+    
+    Returns:
+        str: The environment variable value.
+    
+    Raises:
+        RuntimeError: If the environment variable is not set or is empty.
+    """
     value = os.getenv(var_name)
     if not value:
         raise RuntimeError(f"Environment variable '{var_name}' must be set.")
@@ -29,6 +41,18 @@ def get_required_env(var_name: str) -> str:
 
 
 def get_optional_int_env(var_name: str) -> int | None:
+    """
+    Retrieve an optional integer from the environment by variable name.
+    
+    Parameters:
+        var_name (str): Name of the environment variable to read.
+    
+    Returns:
+        int | None: The integer value if the variable is present and parses as an integer; otherwise `None`.
+    
+    Raises:
+        ValueError: If the environment variable is set but cannot be parsed as an integer.
+    """
     value = os.getenv(var_name)
     if value is None or value == "":
         return None
@@ -48,6 +72,16 @@ LOG_MAX_AGE = timedelta(days=1)
 
 
 def cleanup_logs(path: str, max_age: timedelta) -> None:
+    """
+    Truncates the log file at the given path when its last modification time is older than the specified maximum age.
+    
+    Parameters:
+        path (str): Filesystem path to the log file to check.
+        max_age (timedelta): Maximum allowed age; if the file's age (now - last modification time) is greater than this, the file will be emptied.
+    
+    Notes:
+        If the file does not exist, the function does nothing.
+    """
     if not os.path.exists(path):
         return
 
@@ -60,7 +94,14 @@ cleanup_logs(LOG_FILE, LOG_MAX_AGE)
 
 
 def ensure_cover_constraints(path: Path | str) -> None:
-    """Downscale/optimize cover art to satisfy Telegram audio thumbnail limits."""
+    """
+    Ensure a cover image meets Telegram audio thumbnail requirements.
+    
+    If the file exists, converts the image to RGB JPEG and resizes it to at most 320×320 pixels (preserving aspect ratio), overwriting the original file with an optimized JPEG at quality 85. If the file does not exist, the function does nothing.
+    
+    Parameters:
+        path (Path | str): Path to the cover image file.
+    """
     cover_path = Path(path)
     if not cover_path.exists():
         return
@@ -72,7 +113,19 @@ def ensure_cover_constraints(path: Path | str) -> None:
 
 
 async def download_cover_image(url: str, destination: Path) -> None:
-    """Fetches cover art asynchronously and stores it at destination."""
+    """
+    Download an image from the given URL and write it to the specified destination path.
+    
+    Parameters:
+        url (str): HTTP(S) URL of the image to download.
+        destination (Path): Filesystem path where the image will be saved; parent directories are created if missing.
+    
+    Raises:
+        asyncio.TimeoutError: If the request does not complete within 15 seconds.
+        aiohttp.ClientResponseError: If the HTTP response status indicates an error.
+        aiohttp.ClientError: For other network-related errors.
+        OSError: If writing the file to disk fails.
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
     async with asyncio.timeout(15):
         async with aiohttp.ClientSession() as session:
@@ -103,6 +156,12 @@ database.init_db()
 
 @dp.message(Command('start'))
 async def welcome(message: types.Message):
+    """
+    Register the sender of a Telegram message in the user database and send a localized welcome prompt.
+    
+    Parameters:
+        message (aiogram.types.Message): Incoming Telegram message whose sender (id, username, first_name, last_name) will be recorded and who will receive the greeting.
+    """
     user = message.from_user
     database.add_user(user.id, user.username, user.first_name, user.last_name)
     await message.answer(
@@ -112,6 +171,11 @@ async def welcome(message: types.Message):
 
 @dp.message(F.text)
 async def process_track_link(message: types.Message):
+    """
+    Process an incoming Telegram message that contains a Spotify track link and deliver the corresponding audio to the user.
+    
+    Parses the Spotify link from the provided message, resolves track metadata (using cache when available), ensures cover art meets thumbnail constraints, downloads the audio from YouTube if not cached, and sends the audio with title, performer, and thumbnail to the chat. Handles network and processing errors by notifying the user and always removes the temporary status message after completion.
+    """
     if not spotify_client.is_spotify_link(message.text):
         logging.info(f"{message.date} - {message.chat.id} - {message.text}")
         return
@@ -121,6 +185,11 @@ async def process_track_link(message: types.Message):
     status_deleted = False
 
     async def delete_status_message() -> None:
+        """
+        Safely deletes the current status message if it has not already been deleted.
+        
+        If deletion fails due to a TelegramBadRequest error, the error is suppressed. Always marks the status as deleted so subsequent calls are no-ops.
+        """
         nonlocal status_deleted
         if status_deleted:
             return
@@ -188,6 +257,11 @@ async def process_track_link(message: types.Message):
         await delete_status_message()
 
 async def main():
+    """
+    Start the bot's polling loop and keep it running, retrying on transient Telegram network errors.
+    
+    This coroutine begins long-lived polling of incoming updates for the configured Dispatcher and Bot. If a Telegram network error occurs, polling is retried after a short delay. If the coroutine is cancelled, it logs shutdown intent and re-raises asyncio.CancelledError. The function returns when polling stops normally.
+    """
     logging.info("Starting bot...")
     retry_delay = 3
 

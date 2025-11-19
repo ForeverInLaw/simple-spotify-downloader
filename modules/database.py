@@ -4,7 +4,15 @@ import logging
 DB_NAME = 'users.db'
 
 def init_db():
-    """Initializes the database and creates the users table if it doesn't exist."""
+    """
+    Create the application's SQLite database file and ensure required tables exist.
+    
+    Creates two tables when missing:
+    - users: user_id (INTEGER PRIMARY KEY), username, first_name, last_name.
+    - tracks: track_id (TEXT PRIMARY KEY), name (NOT NULL), artist (NOT NULL), album, image_url, created_at (defaults to CURRENT_TIMESTAMP).
+    
+    If a sqlite3.Error occurs, an error is logged and the function returns without raising.
+    """
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
@@ -31,7 +39,18 @@ def init_db():
         logging.error(f"Database initialization error: {e}")
 
 def add_user(user_id: int, username: str, first_name: str, last_name: str):
-    """Adds or updates a user in the database."""
+    """
+    Upserts a user record into the database's users table.
+    
+    Parameters:
+        user_id (int): The user's unique identifier.
+        username (str): The user's username.
+        first_name (str): The user's first name.
+        last_name (str): The user's last name.
+    
+    Notes:
+        Database errors are logged and not propagated.
+    """
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
@@ -46,7 +65,12 @@ def add_user(user_id: int, username: str, first_name: str, last_name: str):
 
 
 def upsert_track(track_info: dict):
-    """Caches track metadata for reuse."""
+    """
+    Cache track metadata for later retrieval.
+    
+    Parameters:
+        track_info (dict): Track data with required keys `id`, `name`, and `artist`; optional keys `album` and `image_url`.
+    """
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
@@ -69,7 +93,13 @@ def upsert_track(track_info: dict):
 
 
 def get_track(track_id: str):
-    """Returns cached track metadata if available."""
+    """
+    Retrieve cached metadata for a track by its ID.
+    
+    Returns:
+        dict: A mapping with keys `id`, `name`, `artist`, `album`, and `image_url` when the track is found.
+        None: If the track is not present in the cache or a database error occurs.
+    """
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()

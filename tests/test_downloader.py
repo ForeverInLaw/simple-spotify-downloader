@@ -7,6 +7,14 @@ from modules import downloader
 
 @pytest.fixture()
 def temp_download_dirs(monkeypatch, tmp_path):
+    """
+    Create a temporary downloads directory structure and patch downloader path constants to point at it.
+    
+    Creates a temporary "downloads" root with "tracks" and "covers" subdirectories, and uses the provided monkeypatch fixture to override downloader.DOWNLOADS_ROOT, downloader.TRACKS_DIR, and downloader.COVERS_DIR to those paths.
+    
+    Returns:
+        tuple: (root_path, tracks_path, covers_path) — the Path objects for the downloads root, tracks directory, and covers directory.
+    """
     root = tmp_path / "downloads"
     tracks = root / "tracks"
     covers = root / "covers"
@@ -21,6 +29,19 @@ def temp_download_dirs(monkeypatch, tmp_path):
 
 
 def _write_fake_track(tracks_dir, covers_dir, track_id, size):
+    """
+    Create a fake track file and its cover for use in tests.
+    
+    Creates an MP3 file named "<track_id>.mp3" in `tracks_dir` with exactly `size` bytes
+    and sets its access and modification times to `(track_id, track_id)`. Also creates a
+    cover file named "<track_id>.jpg" in `covers_dir` containing a single byte.
+    
+    Parameters:
+        tracks_dir (pathlib.Path): Directory to write the track file into.
+        covers_dir (pathlib.Path): Directory to write the cover file into.
+        track_id (int): Identifier used for the filenames and file timestamps.
+        size (int): Number of bytes to write to the track file.
+    """
     track_path = tracks_dir / f"{track_id}.mp3"
     track_path.write_bytes(b"0" * size)
     os.utime(track_path, (track_id, track_id))

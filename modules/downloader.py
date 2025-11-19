@@ -19,6 +19,12 @@ CLEANUP_BATCH = 2
 
 class Downloader:
     def __init__(self, max_storage_mb: int | None = None):
+        """
+        Create a Downloader instance configured with an optional storage quota.
+        
+        Parameters:
+            max_storage_mb (int | None): Maximum allowed storage for downloaded tracks in megabytes. If `None` or a value less than or equal to zero, storage quota enforcement is disabled.
+        """
         self.executor = ThreadPoolExecutor(max_workers=4)
         if max_storage_mb is None or max_storage_mb <= 0:
             self.max_storage_bytes = 0
@@ -27,7 +33,10 @@ class Downloader:
 
     async def search_youtube(self, query: str) -> str:
         """
-        Searches for a video on YouTube using yt-dlp and returns the URL.
+        Finds the first YouTube video URL matching the given search query.
+        
+        @returns
+            str: URL of the top matching YouTube video, or `None` if no match is found.
         """
         ydl_opts = {
             'format': 'bestaudio/best',
@@ -37,6 +46,12 @@ class Downloader:
         }
 
         def _search():
+            """
+            Finds the webpage URL of the first video returned by a yt_dlp query.
+            
+            Returns:
+                str: The first result's `webpage_url` if a match is found, `None` otherwise.
+            """
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(query, download=False)
                 if 'entries' in info and info['entries']:
@@ -48,8 +63,16 @@ class Downloader:
 
     async def download_track(self, url: str, track_id: str) -> str:
         """
-        Downloads the track from YouTube URL.
-        Returns the path to the downloaded file.
+        Download a YouTube audio track as an MP3 file named by track_id into the tracks directory.
+        
+        If a file for the given track_id already exists, the existing file path is returned (cache hit) and storage quota enforcement runs. After a successful download the storage quota is enforced and the saved file path is returned.
+        
+        Parameters:
+            url (str): YouTube video URL to download audio from.
+            track_id (str): Identifier used as the output filename (file stem, without extension).
+        
+        Returns:
+            Path: The filesystem path of the saved MP3 file.
         """
         output_path = TRACKS_DIR / f'{track_id}.mp3'
         
@@ -71,6 +94,11 @@ class Downloader:
         }
 
         def _download():
+            """
+            Perform the download for the configured URL using the surrounding `ydl_opts`.
+            
+            Executes yt_dlp with the options provided in the enclosing scope to download the specified `url` according to the configured output template and post-processing steps.
+            """
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
         
@@ -82,6 +110,15 @@ class Downloader:
         return output_path
 
     def _directory_size(self, root: Path) -> int:
+        """
+        Compute the total size of all files under the given directory tree.
+        
+        Parameters:
+            root (Path): Root directory to traverse and measure.
+        
+        Returns:
+            total_size (int): Sum in bytes of all files under `root`; files that raise OSError during stat are skipped.
+        """
         total = 0
         for dirpath, _, filenames in os.walk(root):
             for name in filenames:
@@ -93,6 +130,11 @@ class Downloader:
         return total
 
     def _enforce_storage_quota(self) -> None:
+        """
+        Remove oldest downloaded tracks (and their cover images) until the downloads directory size is within the configured storage limit.
+        
+        If no storage limit is configured or the current size is already within the limit, this is a no-op. When the limit is exceeded, the method deletes the oldest MP3 files from TRACKS_DIR in batches of CLEANUP_BATCH, removes their corresponding cover images named {stem}.jpg from COVERS_DIR if present, and calls database.delete_track for each removed track.
+        """
         if not self.max_storage_bytes:
             return
 

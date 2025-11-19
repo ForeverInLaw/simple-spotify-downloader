@@ -24,6 +24,15 @@ def test_is_spotify_link_relies_on_extract(monkeypatch):
     called = {}
 
     def fake_extract(value):
+        """
+        Record the provided value into the shared `called` mapping and return a fixed test ID.
+        
+        Parameters:
+            value: The input value to store in `called["value"]`.
+        
+        Returns:
+            str: The constant string `"id123"`.
+        """
         called["value"] = value
         return "id123"
 
