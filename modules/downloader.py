@@ -25,6 +25,10 @@ class Downloader:
         else:
             self.max_storage_bytes = max_storage_mb * 1024 * 1024
 
+    def close(self) -> None:
+        """Release executor resources."""
+        self.executor.shutdown(wait=False)
+
     async def search_youtube(self, query: str) -> str | None:
         """
         Searches for a video on YouTube using yt-dlp and returns the URL.
@@ -73,7 +77,7 @@ class Downloader:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
         
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(self.executor, _download)
         
         self._enforce_storage_quota()

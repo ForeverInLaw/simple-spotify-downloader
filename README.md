@@ -27,7 +27,10 @@ Telegram bot that converts Spotify track links into MP3 files by resolving track
    ```bash
    ffmpeg -version   # confirm installed and on PATH
    python -m venv .venv
+   # Windows
    .venv\Scripts\activate
+   # macOS/Linux
+   source .venv/bin/activate
    pip install -r requirements.txt
    ```
 

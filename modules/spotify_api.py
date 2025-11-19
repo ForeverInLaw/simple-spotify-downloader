@@ -42,8 +42,8 @@ class SpotifyClient:
                 'album': album_info.get('name') if isinstance(album_info, dict) else None,
                 'image_url': image_url
             }
-        except Exception as e:
-            logging.exception(f"Error fetching Spotify track info: {e}")
+        except Exception:
+            logging.exception("Error fetching Spotify track info for track_id=%s", track_id)
             raise
 
     @staticmethod
@@ -63,7 +63,10 @@ class SpotifyClient:
 
         # Remove query params
         cleaned = re.sub(r'\?.*$', '', text)
-        match = re.search(r'open\.spotify\.com/track/([A-Za-z0-9]+)', cleaned)
+        match = re.search(
+            r'open\.spotify\.com/(?:intl-[^/]+/)?track/([A-Za-z0-9]+)',
+            cleaned,
+        )
         if match:
             return match.group(1)
         return None

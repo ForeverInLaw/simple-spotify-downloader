@@ -29,6 +29,7 @@ def init_db():
             conn.commit()
     except sqlite3.Error:
         logging.exception("Database initialization error")
+        raise
 
 def add_user(user_id: int, username: str, first_name: str, last_name: str):
     """Adds or updates a user in the database."""
