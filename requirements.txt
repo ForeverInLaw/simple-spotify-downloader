@@ -1,5 +1,8 @@
 aiohttp
 spotipy
-pytube
+yt-dlp[default]
 requests
 aiogram
+python-dotenv
+pillow
+pytest
