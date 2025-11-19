@@ -31,7 +31,11 @@ class Downloader:
         else:
             self.max_storage_bytes = max_storage_mb * 1024 * 1024
 
-    async def search_youtube(self, query: str) -> str:
+    def close(self) -> None:
+        """Release executor resources."""
+        self.executor.shutdown(wait=False)
+
+    async def search_youtube(self, query: str) -> str | None:
         """
         Finds the first YouTube video URL matching the given search query.
         
@@ -54,11 +58,10 @@ class Downloader:
             """
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(query, download=False)
-                if 'entries' in info and info['entries']:
-                    return info['entries'][0]['webpage_url']
-                return None
+                entries = info.get('entries') or []
+                return entries[0]['webpage_url'] if entries else None
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self.executor, _search)
 
     async def download_track(self, url: str, track_id: str) -> str:
@@ -102,7 +105,7 @@ class Downloader:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
         
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(self.executor, _download)
         
         self._enforce_storage_quota()
@@ -157,17 +160,26 @@ class Downloader:
             if not track_files:
                 break
 
+            deleted_something = False
             for path in track_files[:CLEANUP_BATCH]:
                 try:
                     path.unlink()
+                    deleted_something = True
                     logging.info("Removed cached track %s due to storage limit", path.name)
                     database.delete_track(path.stem)
 
                     cover_path = COVERS_DIR / f"{path.stem}.jpg"
                     if cover_path.exists():
                         cover_path.unlink()
+                        deleted_something = True
                         logging.info("Removed cached cover %s", cover_path.name)
                 except OSError as exc:
                     logging.warning("Failed to remove %s: %s", path, exc)
 
             total_size = self._directory_size(DOWNLOADS_ROOT)
+
+            if not deleted_something:
+                logging.warning(
+                    "Cleanup stalled; failed to delete any files despite exceeding storage limit"
+                )
+                break

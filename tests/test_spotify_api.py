@@ -11,6 +11,14 @@ from modules.spotify_api import SpotifyClient
             "https://open.spotify.com/track/abcdefghijklmno?si=deadbeef",
             "abcdefghijklmno",
         ),
+        (
+            "https://open.spotify.com/intl-en/track/1234567890abcdef",
+            "1234567890abcdef",
+        ),
+        (
+            "https://open.spotify.com/track/abcdefghijklmno/",
+            "abcdefghijklmno",
+        ),
         ("spotify:track:zzYYxx1122", "zzYYxx1122"),
         ("https://open.spotify.com/playlist/abc", None),
         ("not a link", None),

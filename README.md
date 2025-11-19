@@ -27,7 +27,10 @@ Telegram bot that converts Spotify track links into MP3 files by resolving track
    ```bash
    ffmpeg -version   # confirm installed and on PATH
    python -m venv .venv
+   # Windows
    .venv\Scripts\activate
+   # macOS/Linux
+   source .venv/bin/activate
    pip install -r requirements.txt
    ```
 
@@ -43,7 +46,7 @@ Telegram bot that converts Spotify track links into MP3 files by resolving track
 
 3. **Enable yt-dlp JS runtime**
    Ensure `yt-dlp.conf` contains:
-   ```
+   ```conf
    --js-runtimes deno
    ```
    Adjust the runtime or path if you prefer Node/Bun/QuickJS.
@@ -61,7 +64,7 @@ Send a Spotify track URL (for example, `https://open.spotify.com/track/<id>`) to
 
 ## Project Structure
 
-```
+```text
 modules/
   database.py      # SQLite helpers for users and track cache
   downloader.py    # yt-dlp search/download helpers
