@@ -69,12 +69,14 @@ class SpotifyClient:
     @staticmethod
     def is_spotify_link(text: str) -> bool:
         """
-        Determines whether a string contains a Spotify track URL or URI.
+        Determines whether a string contains a Spotify track, playlist, or album URL/URI.
         
         Returns:
-            true if the text contains a Spotify track ID, false otherwise.
+            true if the text contains a Spotify track, playlist, or album ID, false otherwise.
         """
-        return SpotifyClient.extract_track_id(text) is not None
+        return (SpotifyClient.extract_track_id(text) is not None) or \
+               (SpotifyClient.extract_playlist_id(text) is not None) or \
+               (SpotifyClient.extract_album_id(text) is not None)
 
     @staticmethod
     def extract_track_id(text: str) -> str | None:
@@ -104,3 +106,227 @@ class SpotifyClient:
         if match:
             return match.group(1)
         return None
+
+    @staticmethod
+    def extract_playlist_id(text: str) -> str | None:
+        """
+        Extract the Spotify playlist ID from a URL or URI.
+        
+        Parameters:
+            text (str): A Spotify playlist URL or URI.
+        
+        Returns:
+            playlist_id (str | None): The extracted playlist ID if present, otherwise `None`.
+        """
+        if not text:
+            return None
+
+        text = text.strip()
+
+        if text.startswith('spotify:playlist:'):
+            return text.split(':')[-1]
+
+        # Remove query params
+        cleaned = re.sub(r'\?.*$', '', text)
+        match = re.search(
+            r'open\.spotify\.com/(?:intl-[^/]+/)?playlist/([A-Za-z0-9]+)',
+            cleaned,
+        )
+        if match:
+            return match.group(1)
+        return None
+
+    @staticmethod
+    def extract_album_id(text: str) -> str | None:
+        """
+        Extract the Spotify album ID from a URL or URI.
+        
+        Parameters:
+            text (str): A Spotify album URL or URI.
+        
+        Returns:
+            album_id (str | None): The extracted album ID if present, otherwise `None`.
+        """
+        if not text:
+            return None
+
+        text = text.strip()
+
+        if text.startswith('spotify:album:'):
+            return text.split(':')[-1]
+
+        # Remove query params
+        cleaned = re.sub(r'\?.*$', '', text)
+        match = re.search(
+            r'open\.spotify\.com/(?:intl-[^/]+/)?album/([A-Za-z0-9]+)',
+            cleaned,
+        )
+        if match:
+            return match.group(1)
+        return None
+
+    def get_playlist_info(self, playlist_id: str) -> dict:
+        """
+        Retrieve basic metadata for a Spotify playlist.
+        
+        Parameters:
+            playlist_id (str): Spotify playlist ID.
+            
+        Returns:
+            dict: Dictionary with playlist metadata (id, name, owner, total_tracks).
+        """
+        try:
+            playlist = self.sp.playlist(playlist_id, fields="id,name,owner.display_name,tracks.total")
+            return {
+                'id': playlist['id'],
+                'name': playlist['name'],
+                'owner': playlist['owner']['display_name'],
+                'total_tracks': playlist['tracks']['total']
+            }
+        except Exception:
+            logging.exception("Error fetching Spotify playlist info for playlist_id=%s", playlist_id)
+            raise
+
+    def get_playlist_tracks(self, playlist_id: str) -> list[dict]:
+        """
+        Retrieve all tracks from a Spotify playlist.
+        
+        Parameters:
+            playlist_id (str): Spotify playlist ID.
+            
+        Returns:
+            list[dict]: List of dictionaries, each containing track metadata (id, name, artist, album, image_url).
+        """
+        tracks_metadata = []
+        try:
+            results = self.sp.playlist_items(playlist_id)
+            
+            while results:
+                for item in results['items']:
+                    track = item.get('track')
+                    if not track:
+                        continue
+                        
+                    # Extract same metadata as get_track_info
+                    artists = track.get('artists', [])
+                    album_info = track.get('album', {})
+                    images = album_info.get('images', []) if isinstance(album_info, dict) else []
+
+                    first_artist = artists[0] if artists else {}
+                    artist_name = (
+                        first_artist.get('name')
+                        if isinstance(first_artist, dict)
+                        else first_artist
+                    )
+
+                    first_image = images[0] if images else {}
+                    image_url = (
+                        first_image.get('url')
+                        if isinstance(first_image, dict)
+                        else first_image
+                    ) or None
+                    
+                    tracks_metadata.append({
+                        'id': track['id'],
+                        'name': track['name'],
+                        'artist': artist_name or 'Unknown Artist',
+                        'album': album_info.get('name') if isinstance(album_info, dict) else None,
+                        'image_url': image_url
+                    })
+                
+                if results['next']:
+                    results = self.sp.next(results)
+                else:
+                    break
+                    
+            return tracks_metadata
+        except Exception:
+            logging.exception("Error fetching Spotify playlist tracks for playlist_id=%s", playlist_id)
+            raise
+
+    def get_album_info(self, album_id: str) -> dict:
+        """
+        Retrieve basic metadata for a Spotify album.
+        
+        Parameters:
+            album_id (str): Spotify album ID.
+            
+        Returns:
+            dict: Dictionary with album metadata (id, name, artist, image_url, total_tracks).
+        """
+        try:
+            album = self.sp.album(album_id)
+            
+            artists = album.get('artists', [])
+            first_artist = artists[0] if artists else {}
+            artist_name = (
+                first_artist.get('name')
+                if isinstance(first_artist, dict)
+                else first_artist
+            )
+            
+            images = album.get('images', [])
+            first_image = images[0] if images else {}
+            image_url = (
+                first_image.get('url')
+                if isinstance(first_image, dict)
+                else first_image
+            ) or None
+
+            return {
+                'id': album['id'],
+                'name': album['name'],
+                'artist': artist_name or 'Unknown Artist',
+                'image_url': image_url,
+                'total_tracks': album['total_tracks']
+            }
+        except Exception:
+            logging.exception("Error fetching Spotify album info for album_id=%s", album_id)
+            raise
+
+    def get_album_tracks(self, album_id: str, album_info: dict) -> list[dict]:
+        """
+        Retrieve all tracks from a Spotify album.
+        
+        Parameters:
+            album_id (str): Spotify album ID.
+            album_info (dict): Album metadata (must contain 'name' and 'image_url') to inject into track data.
+            
+        Returns:
+            list[dict]: List of dictionaries, each containing track metadata.
+        """
+        tracks_metadata = []
+        try:
+            results = self.sp.album_tracks(album_id)
+            
+            while results:
+                for track in results['items']:
+                    if not track:
+                        continue
+                        
+                    artists = track.get('artists', [])
+                    first_artist = artists[0] if artists else {}
+                    artist_name = (
+                        first_artist.get('name')
+                        if isinstance(first_artist, dict)
+                        else first_artist
+                    )
+
+                    # Album tracks don't have album/image info, so we use the passed album_info
+                    tracks_metadata.append({
+                        'id': track['id'],
+                        'name': track['name'],
+                        'artist': artist_name or 'Unknown Artist',
+                        'album': album_info.get('name'),
+                        'image_url': album_info.get('image_url')
+                    })
+                
+                if results['next']:
+                    results = self.sp.next(results)
+                else:
+                    break
+                    
+            return tracks_metadata
+        except Exception:
+            logging.exception("Error fetching Spotify album tracks for album_id=%s", album_id)
+            raise
