@@ -45,7 +45,7 @@ class SpotifyClient:
             return None, None
 
         album_name = album_info.get('name')
-        images = album_info.get('images') if isinstance(album_info, dict) else None
+        images = album_info.get('images')
         image_url = cls._extract_image_url(images if isinstance(images, list) else None)
         return album_name, image_url
 

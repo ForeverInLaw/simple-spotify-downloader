@@ -395,8 +395,8 @@ async def download_and_send_track(message: types.Message, track_id: str, status_
                 ensure_cover_constraints(cover_path)
                 if cover_path.exists():
                     thumb = FSInputFile(cover_path)
-            except (ClientError, asyncio.TimeoutError) as exc:
-                logging.exception("Error downloading cover art: %s", exc)
+            except (ClientError, asyncio.TimeoutError):
+                logging.exception("Error downloading cover art")
                 if status_msg:
                     await message.answer("⚠️ Не удалось загрузить обложку, отправляю трек без неё.")
 
