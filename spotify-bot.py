@@ -177,22 +177,170 @@ async def process_track_link(message: types.Message):
     
     Parses the Spotify link from the provided message, resolves track metadata (using cache when available), ensures cover art meets thumbnail constraints, downloads the audio from YouTube if not cached, and sends the audio with title, performer, and thumbnail to the chat. Handles network and processing errors by notifying the user and always removes the temporary status message after completion.
     """
+    # Check if it's a playlist first
+    playlist_id = spotify_client.extract_playlist_id(message.text)
+    if playlist_id:
+        await process_playlist_link(message, playlist_id)
+        return
+
+    # Check if it's an album
+    album_id = spotify_client.extract_album_id(message.text)
+    if album_id:
+        await process_album_link(message, album_id)
+        return
+
+    # Otherwise assume it's a track
     if not spotify_client.is_spotify_link(message.text):
         logging.info(f"{message.date} - {message.chat.id} - {message.text}")
         return
 
     status_msg = await message.answer("🔍 Ищу трек...")
 
+    try:
+        track_id = spotify_client.extract_track_id(message.text)
+        if not track_id:
+            await message.answer("❌ Не удалось получить ID трека.")
+            await status_msg.delete()
+            return
+
+        await download_and_send_track(message, track_id, status_msg)
+
+    except Exception as e:
+        logging.exception("Error processing request: %s", e)
+        await message.answer("❌ Произошла ошибка при обработке. Попробуйте позже.")
+        try:
+            await status_msg.delete()
+        except TelegramBadRequest:
+            pass
+
+
+async def process_playlist_link(message: types.Message, playlist_id: str):
+    """
+    Process a Spotify playlist link: fetch tracks and send them concurrently.
+    """
+    status_msg = await message.answer("🔍 Получаю информацию о плейлисте...")
+    
+    try:
+        playlist_info = spotify_client.get_playlist_info(playlist_id)
+        playlist_name = playlist_info['name']
+        total_tracks = playlist_info['total_tracks']
+        
+        await status_msg.edit_text(f"📄 Плейлист: {playlist_name}\n🔢 Треков: {total_tracks}\n🚀 Начинаю загрузку...")
+        
+        tracks = spotify_client.get_playlist_tracks(playlist_id)
+        
+        # Concurrency limit
+        semaphore = asyncio.Semaphore(10)
+        completed_count = 0
+        
+        async def bounded_download(track):
+            nonlocal completed_count
+            async with semaphore:
+                # Upsert track info to DB
+                database.upsert_track(track)
+                try:
+                    # We pass None for status_msg because we manage status centrally
+                    await download_and_send_track(message, track['id'], None)
+                except Exception as e:
+                    logging.error(f"Failed to download/send track {track['id']}: {e}")
+                    # Optional: notify user about specific failure? 
+                    # For now, we just log it to avoid spamming chat
+                finally:
+                    completed_count += 1
+                    # Update status every 3 tracks or on the last one to reduce API calls
+                    if completed_count % 3 == 0 or completed_count == total_tracks:
+                        try:
+                            await status_msg.edit_text(
+                                f"📄 Плейлист: {playlist_name}\n"
+                                f"📤 Загрузка: {completed_count}/{total_tracks}\n"
+                                f"🎵 Обработано: {track['artist']} - {track['name']}"
+                            )
+                        except TelegramBadRequest:
+                            pass
+
+        tasks = [bounded_download(track) for track in tracks]
+        await asyncio.gather(*tasks)
+            
+        await status_msg.edit_text(f"✅ Плейлист {playlist_name} загружен!")
+        
+    except Exception as e:
+        logging.exception("Error processing playlist: %s", e)
+        await message.answer("❌ Произошла ошибка при обработке плейлиста.")
+        try:
+            await status_msg.delete()
+        except TelegramBadRequest:
+            pass
+
+
+async def process_album_link(message: types.Message, album_id: str):
+    """
+    Process a Spotify album link: fetch tracks and send them concurrently.
+    """
+    status_msg = await message.answer("🔍 Получаю информацию об альбоме...")
+    
+    try:
+        album_info = spotify_client.get_album_info(album_id)
+        album_name = album_info['name']
+        artist_name = album_info['artist']
+        total_tracks = album_info['total_tracks']
+        
+        await status_msg.edit_text(f"💿 Альбом: {album_name} - {artist_name}\n🔢 Треков: {total_tracks}\n🚀 Начинаю загрузку...")
+        
+        tracks = spotify_client.get_album_tracks(album_id, album_info)
+        
+        # Concurrency limit
+        semaphore = asyncio.Semaphore(10)
+        completed_count = 0
+        
+        async def bounded_download(track):
+            nonlocal completed_count
+            async with semaphore:
+                # Upsert track info to DB
+                database.upsert_track(track)
+                try:
+                    await download_and_send_track(message, track['id'], None)
+                except Exception as e:
+                    logging.error(f"Failed to download/send track {track['id']}: {e}")
+                finally:
+                    completed_count += 1
+                    if completed_count % 3 == 0 or completed_count == total_tracks:
+                        try:
+                            await status_msg.edit_text(
+                                f"💿 Альбом: {album_name}\n"
+                                f"📤 Загрузка: {completed_count}/{total_tracks}\n"
+                                f"🎵 Обработано: {track['artist']} - {track['name']}"
+                            )
+                        except TelegramBadRequest:
+                            pass
+
+        tasks = [bounded_download(track) for track in tracks]
+        await asyncio.gather(*tasks)
+            
+        await status_msg.edit_text(f"✅ Альбом {album_name} загружен!")
+        
+    except Exception as e:
+        logging.exception("Error processing album: %s", e)
+        await message.answer("❌ Произошла ошибка при обработке альбома.")
+        try:
+            await status_msg.delete()
+        except TelegramBadRequest:
+            pass
+
+
+async def download_and_send_track(message: types.Message, track_id: str, status_msg: types.Message | None = None):
+    """
+    Download and send a single track to the user.
+    
+    Parameters:
+        message: The original message to reply to.
+        track_id: The Spotify track ID.
+        status_msg: Optional status message to update. If None, no status updates are sent (assumed part of playlist).
+    """
     status_deleted = False
 
     async def delete_status_message() -> None:
-        """
-        Safely deletes the current status message if it has not already been deleted.
-        
-        If deletion fails due to a TelegramBadRequest error, the error is suppressed. Always marks the status as deleted so subsequent calls are no-ops.
-        """
         nonlocal status_deleted
-        if status_deleted:
+        if status_deleted or not status_msg:
             return
         try:
             await status_msg.delete()
@@ -202,12 +350,6 @@ async def process_track_link(message: types.Message):
             status_deleted = True
 
     try:
-        # 1. Resolve track ID and get metadata (cache first)
-        track_id = spotify_client.extract_track_id(message.text)
-        if not track_id:
-            await message.answer("❌ Не удалось получить ID трека.")
-            return
-
         track_info = database.get_track(track_id)
         if not track_info:
             track_info = spotify_client.get_track_info(track_id)
@@ -217,7 +359,7 @@ async def process_track_link(message: types.Message):
         artist_name = track_info['artist']
         mp3_path = TRACKS_DIR / f"{track_id}.mp3"
 
-        # 2. Handle Cover Art
+        # Handle Cover Art
         thumb: FSInputFile | None = None
         image_url = track_info.get('image_url')
         if image_url:
@@ -228,21 +370,25 @@ async def process_track_link(message: types.Message):
             if cover_path.exists():
                 thumb = FSInputFile(cover_path)
 
-        # 3. Use cache if exists, otherwise search/download
+        # Download if needed
         if mp3_path.exists():
-            await status_msg.edit_text("📤 Отправляю...")
+            if status_msg:
+                await status_msg.edit_text("📤 Отправляю...")
         else:
-            await status_msg.edit_text(f"📥 Скачиваю: {artist_name} - {track_name}")
+            if status_msg:
+                await status_msg.edit_text(f"📥 Скачиваю: {artist_name} - {track_name}")
+            
             search_query = f"{artist_name} - {track_name} audio"
             youtube_url = await downloader.search_youtube(search_query)
 
             if not youtube_url:
-                await message.answer("❌ Не удалось найти трек на YouTube.")
+                if status_msg:
+                    await message.answer("❌ Не удалось найти трек на YouTube.")
                 return
 
             mp3_path = await downloader.download_track(youtube_url, track_id)
 
-        # 4. Send Audio
+        # Send Audio
         audio_file = FSInputFile(mp3_path)
         audio_kwargs = {
             "audio": audio_file,
@@ -256,10 +402,12 @@ async def process_track_link(message: types.Message):
 
     except (ClientError, asyncio.TimeoutError) as exc:
         logging.exception("Error downloading cover art: %s", exc)
-        await message.answer("❌ Не удалось загрузить обложку. Попробуйте позже.")
+        if status_msg:
+            await message.answer("❌ Не удалось загрузить обложку. Попробуйте позже.")
     except Exception as e:
         logging.exception("Error processing request: %s", e)
-        await message.answer("❌ Произошла ошибка при обработке. Попробуйте позже.")
+        if status_msg:
+            await message.answer("❌ Произошла ошибка при обработке. Попробуйте позже.")
         raise
     finally:
         await delete_status_message()
