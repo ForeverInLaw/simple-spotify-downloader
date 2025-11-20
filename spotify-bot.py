@@ -173,9 +173,13 @@ async def welcome(message: types.Message):
 @dp.message(F.text)
 async def process_track_link(message: types.Message):
     """
-    Process an incoming Telegram message that contains a Spotify track link and deliver the corresponding audio to the user.
-    
-    Parses the Spotify link from the provided message, resolves track metadata (using cache when available), ensures cover art meets thumbnail constraints, downloads the audio from YouTube if not cached, and sends the audio with title, performer, and thumbnail to the chat. Handles network and processing errors by notifying the user and always removes the temporary status message after completion.
+    Process an incoming Spotify link and route it to the proper handler.
+
+    The function first checks whether the message references a playlist or album and delegates to the
+    playlist/album handlers when needed. For single-track links it resolves track metadata (using cache when
+    available), ensures cover art meets thumbnail constraints, downloads the audio from YouTube if not cached,
+    and sends the audio with title, performer, and thumbnail to the chat. Handles network and processing errors
+    by notifying the user and always removes the temporary status message after completion.
     """
     # Check if it's a playlist first
     playlist_id = spotify_client.extract_playlist_id(message.text)
@@ -204,8 +208,8 @@ async def process_track_link(message: types.Message):
 
         await download_and_send_track(message, track_id, status_msg)
 
-    except Exception as e:
-        logging.exception("Error processing request: %s", e)
+    except Exception:
+        logging.exception("Error processing request")
         await message.answer("❌ Произошла ошибка при обработке. Попробуйте позже.")
         try:
             await status_msg.delete()
@@ -231,21 +235,26 @@ async def process_playlist_link(message: types.Message, playlist_id: str):
         # Concurrency limit
         semaphore = asyncio.Semaphore(10)
         completed_count = 0
+        failed_count = 0
         
         async def bounded_download(track):
-            nonlocal completed_count
+            nonlocal completed_count, failed_count
             async with semaphore:
                 # Upsert track info to DB
                 database.upsert_track(track)
+                success = True
                 try:
                     # We pass None for status_msg because we manage status centrally
                     await download_and_send_track(message, track['id'], None)
-                except Exception as e:
-                    logging.error(f"Failed to download/send track {track['id']}: {e}")
+                except Exception:
+                    success = False
+                    logging.exception("Failed to download/send track %s", track.get('id'))
                     # Optional: notify user about specific failure? 
                     # For now, we just log it to avoid spamming chat
                 finally:
                     completed_count += 1
+                    if not success:
+                        failed_count += 1
                     # Update status every 3 tracks or on the last one to reduce API calls
                     if completed_count % 3 == 0 or completed_count == total_tracks:
                         try:
@@ -259,11 +268,17 @@ async def process_playlist_link(message: types.Message, playlist_id: str):
 
         tasks = [bounded_download(track) for track in tracks]
         await asyncio.gather(*tasks)
-            
-        await status_msg.edit_text(f"✅ Плейлист {playlist_name} загружен!")
+
+        if failed_count:
+            await status_msg.edit_text(
+                f"⚠️ Плейлист {playlist_name} загружен с ошибками.\n"
+                f"Успешно: {total_tracks - failed_count}/{total_tracks}"
+            )
+        else:
+            await status_msg.edit_text(f"✅ Плейлист {playlist_name} загружен!")
         
-    except Exception as e:
-        logging.exception("Error processing playlist: %s", e)
+    except Exception:
+        logging.exception("Error processing playlist")
         await message.answer("❌ Произошла ошибка при обработке плейлиста.")
         try:
             await status_msg.delete()
@@ -290,18 +305,23 @@ async def process_album_link(message: types.Message, album_id: str):
         # Concurrency limit
         semaphore = asyncio.Semaphore(10)
         completed_count = 0
+        failed_count = 0
         
         async def bounded_download(track):
-            nonlocal completed_count
+            nonlocal completed_count, failed_count
             async with semaphore:
                 # Upsert track info to DB
                 database.upsert_track(track)
+                success = True
                 try:
                     await download_and_send_track(message, track['id'], None)
-                except Exception as e:
-                    logging.error(f"Failed to download/send track {track['id']}: {e}")
+                except Exception:
+                    success = False
+                    logging.exception("Failed to download/send track %s", track.get('id'))
                 finally:
                     completed_count += 1
+                    if not success:
+                        failed_count += 1
                     if completed_count % 3 == 0 or completed_count == total_tracks:
                         try:
                             await status_msg.edit_text(
@@ -314,11 +334,17 @@ async def process_album_link(message: types.Message, album_id: str):
 
         tasks = [bounded_download(track) for track in tracks]
         await asyncio.gather(*tasks)
-            
-        await status_msg.edit_text(f"✅ Альбом {album_name} загружен!")
+
+        if failed_count:
+            await status_msg.edit_text(
+                f"⚠️ Альбом {album_name} загружен с ошибками.\n"
+                f"Успешно: {total_tracks - failed_count}/{total_tracks}"
+            )
+        else:
+            await status_msg.edit_text(f"✅ Альбом {album_name} загружен!")
         
-    except Exception as e:
-        logging.exception("Error processing album: %s", e)
+    except Exception:
+        logging.exception("Error processing album")
         await message.answer("❌ Произошла ошибка при обработке альбома.")
         try:
             await status_msg.delete()
@@ -363,11 +389,16 @@ async def download_and_send_track(message: types.Message, track_id: str, status_
         image_url = track_info.get('image_url')
         if image_url:
             cover_path = COVERS_DIR / f"{track_id}.jpg"
-            if not cover_path.exists():
-                await download_cover_image(image_url, cover_path)
-            ensure_cover_constraints(cover_path)
-            if cover_path.exists():
-                thumb = FSInputFile(cover_path)
+            try:
+                if not cover_path.exists():
+                    await download_cover_image(image_url, cover_path)
+                ensure_cover_constraints(cover_path)
+                if cover_path.exists():
+                    thumb = FSInputFile(cover_path)
+            except (ClientError, asyncio.TimeoutError) as exc:
+                logging.exception("Error downloading cover art: %s", exc)
+                if status_msg:
+                    await message.answer("⚠️ Не удалось загрузить обложку, отправляю трек без неё.")
 
         # Download if needed
         if mp3_path.exists():
@@ -398,14 +429,9 @@ async def download_and_send_track(message: types.Message, track_id: str, status_
 
         await message.answer_audio(**audio_kwargs)
 
-    except (ClientError, asyncio.TimeoutError) as exc:
-        logging.exception("Error downloading cover art: %s", exc)
-        if status_msg:
-            await message.answer("❌ Не удалось загрузить обложку. Попробуйте позже.")
-    except Exception as e:
-        logging.exception("Error processing request: %s", e)
-        if status_msg:
-            await message.answer("❌ Произошла ошибка при обработке. Попробуйте позже.")
+    except Exception:
+        logging.exception("Error processing request")
+        # Let the caller decide how and when to notify the user.
         raise
     finally:
         await delete_status_message()

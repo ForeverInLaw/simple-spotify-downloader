@@ -19,6 +19,36 @@ class SpotifyClient:
             )
         )
 
+    @staticmethod
+    def _extract_artist_name(artists: list | None) -> str:
+        if not artists:
+            return 'Unknown Artist'
+
+        first_artist = artists[0]
+        if isinstance(first_artist, dict):
+            return first_artist.get('name') or 'Unknown Artist'
+        return first_artist or 'Unknown Artist'
+
+    @staticmethod
+    def _extract_image_url(images: list | None) -> str | None:
+        if not images:
+            return None
+
+        first_image = images[0]
+        if isinstance(first_image, dict):
+            return first_image.get('url') or None
+        return first_image or None
+
+    @classmethod
+    def _extract_album_metadata(cls, album_info: dict | None) -> tuple[str | None, str | None]:
+        if not isinstance(album_info, dict):
+            return None, None
+
+        album_name = album_info.get('name')
+        images = album_info.get('images') if isinstance(album_info, dict) else None
+        image_url = cls._extract_image_url(images if isinstance(images, list) else None)
+        return album_name, image_url
+
     def get_track_info(self, track_id: str) -> dict:
         """
         Retrieve metadata for a Spotify track given its track ID.
@@ -37,29 +67,14 @@ class SpotifyClient:
         try:
             track_info = self.sp.track(track_id)
 
-            artists = track_info.get('artists', [])
-            album_info = track_info.get('album', {})
-            images = album_info.get('images', []) if isinstance(album_info, dict) else []
-
-            first_artist = artists[0] if artists else {}
-            artist_name = (
-                first_artist.get('name')
-                if isinstance(first_artist, dict)
-                else first_artist
-            )
-
-            first_image = images[0] if images else {}
-            image_url = (
-                first_image.get('url')
-                if isinstance(first_image, dict)
-                else first_image
-            ) or None
+            artist_name = self._extract_artist_name(track_info.get('artists'))
+            album_name, image_url = self._extract_album_metadata(track_info.get('album'))
 
             return {
                 'id': track_info['id'],
                 'name': track_info['name'],
-                'artist': artist_name or 'Unknown Artist',
-                'album': album_info.get('name') if isinstance(album_info, dict) else None,
+                'artist': artist_name,
+                'album': album_name,
                 'image_url': image_url
             }
         except Exception:
@@ -204,33 +219,19 @@ class SpotifyClient:
             while results:
                 for item in results['items']:
                     track = item.get('track')
-                    if not track:
+                    # Skip items without a valid track or track ID (e.g., local tracks/podcasts)
+                    if not track or not track.get('id'):
                         continue
                         
                     # Extract same metadata as get_track_info
-                    artists = track.get('artists', [])
-                    album_info = track.get('album', {})
-                    images = album_info.get('images', []) if isinstance(album_info, dict) else []
-
-                    first_artist = artists[0] if artists else {}
-                    artist_name = (
-                        first_artist.get('name')
-                        if isinstance(first_artist, dict)
-                        else first_artist
-                    )
-
-                    first_image = images[0] if images else {}
-                    image_url = (
-                        first_image.get('url')
-                        if isinstance(first_image, dict)
-                        else first_image
-                    ) or None
+                    artist_name = self._extract_artist_name(track.get('artists'))
+                    album_name, image_url = self._extract_album_metadata(track.get('album'))
                     
                     tracks_metadata.append({
                         'id': track['id'],
-                        'name': track['name'],
-                        'artist': artist_name or 'Unknown Artist',
-                        'album': album_info.get('name') if isinstance(album_info, dict) else None,
+                        'name': track.get('name', 'Unknown Title'),
+                        'artist': artist_name,
+                        'album': album_name,
                         'image_url': image_url
                     })
                 
@@ -257,26 +258,13 @@ class SpotifyClient:
         try:
             album = self.sp.album(album_id)
             
-            artists = album.get('artists', [])
-            first_artist = artists[0] if artists else {}
-            artist_name = (
-                first_artist.get('name')
-                if isinstance(first_artist, dict)
-                else first_artist
-            )
-            
-            images = album.get('images', [])
-            first_image = images[0] if images else {}
-            image_url = (
-                first_image.get('url')
-                if isinstance(first_image, dict)
-                else first_image
-            ) or None
+            artist_name = self._extract_artist_name(album.get('artists'))
+            _, image_url = self._extract_album_metadata(album)
 
             return {
                 'id': album['id'],
                 'name': album['name'],
-                'artist': artist_name or 'Unknown Artist',
+                'artist': artist_name,
                 'image_url': image_url,
                 'total_tracks': album['total_tracks']
             }
@@ -301,22 +289,16 @@ class SpotifyClient:
             
             while results:
                 for track in results['items']:
-                    if not track:
+                    if not track or not track.get('id'):
                         continue
                         
-                    artists = track.get('artists', [])
-                    first_artist = artists[0] if artists else {}
-                    artist_name = (
-                        first_artist.get('name')
-                        if isinstance(first_artist, dict)
-                        else first_artist
-                    )
+                    artist_name = self._extract_artist_name(track.get('artists'))
 
                     # Album tracks don't have album/image info, so we use the passed album_info
                     tracks_metadata.append({
                         'id': track['id'],
-                        'name': track['name'],
-                        'artist': artist_name or 'Unknown Artist',
+                        'name': track.get('name', 'Unknown Title'),
+                        'artist': artist_name,
                         'album': album_info.get('name'),
                         'image_url': album_info.get('image_url')
                     })
