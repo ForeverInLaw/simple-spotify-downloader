@@ -21,6 +21,6 @@ services:
     volumes:
       - ./tracks:/app/tracks
       - ./covers:/app/covers
-      - ./database.db:/app/database.db
+      - ./data:/app/data
     env_file:
       - .env
