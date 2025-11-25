@@ -87,9 +87,10 @@ yt-dlp.conf        # yt-dlp runtime configuration
 
 ## Roadmap
 
-1. Playlist downloads
-2. Text-based song search (without Spotify links)
-3. Docker support
+1. [Ready] Playlist downloads
+2. [Ready] Docker support
+3. Text-based song search (without Spotify links)
+
 
 ## License
 
