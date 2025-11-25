@@ -518,10 +518,13 @@ async def download_and_zip_tracks(
 
         for i, chunk in enumerate(zip_chunks):
             part_num = i + 1
-            zip_filename = f"{sanitized_collection_name} (Часть {part_num}).zip"
+            if len(zip_chunks) > 1:
+                zip_filename = f"{sanitized_collection_name} (Часть {part_num}).zip"
+                await status_msg.edit_text(f"📦 Создаю архив {part_num}/{len(zip_chunks)} для '{collection_name}'...")
+            else:
+                zip_filename = f"{sanitized_collection_name}.zip"
+                await status_msg.edit_text(f"📦 Создаю архив для '{collection_name}'...")
             zip_path = TRACKS_DIR / zip_filename
-
-            await status_msg.edit_text(f"📦 Создаю архив {part_num}/{len(zip_chunks)} для '{collection_name}'...")
             with zipfile.ZipFile(zip_path, 'w') as zipf:
                 for track_path in chunk:
                     zipf.write(track_path, arcname=track_path.name)
