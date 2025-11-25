@@ -1,6 +1,8 @@
 import logging
 import asyncio
 import os
+import re
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -66,6 +68,8 @@ TELEGRAM_API_TOKEN = get_required_env("TELEGRAM_API_TOKEN")
 SPOTIFY_CLIENT_ID = get_required_env("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = get_required_env("SPOTIFY_CLIENT_SECRET")
 STORAGE_LIMIT_MB = get_optional_int_env("STORAGE_LIMIT_MB")
+ZIP_THRESHOLD = get_optional_int_env("ZIP_THRESHOLD") or 10
+MAX_ZIP_SIZE = 48 * 1024 * 1024  # 48 MB limit for Telegram bots
 
 LOG_FILE = 'logs.txt'
 LOG_MAX_AGE = timedelta(days=1)
@@ -217,66 +221,93 @@ async def process_track_link(message: types.Message):
             pass
 
 
+async def send_tracks_one_by_one(
+    message: types.Message,
+    status_msg: types.Message,
+    tracks: list,
+    collection_name: str,
+    collection_type: str,  # "Плейлист" or "Альбом"
+    artist_name: str | None = None  # For albums
+):
+    """
+    Downloads and sends tracks one by one, updating a status message.
+    """
+    total_tracks = len(tracks)
+    # Concurrency limit
+    semaphore = asyncio.Semaphore(10)
+    completed_count = 0
+    failed_count = 0
+
+    async def bounded_download(track):
+        nonlocal completed_count, failed_count
+        async with semaphore:
+            database.upsert_track(track)
+            success = True
+            try:
+                await download_and_send_track(message, track['id'], None)
+            except Exception:
+                success = False
+                logging.exception("Failed to download/send track %s", track.get('id'))
+            finally:
+                completed_count += 1
+                if not success:
+                    failed_count += 1
+                if completed_count % 3 == 0 or completed_count == total_tracks:
+                    try:
+                        status_text = (
+                            f"💿 Альбом: {collection_name}\n"
+                            if collection_type == "Альбом"
+                            else f"📄 Плейлист: {collection_name}\n"
+                        )
+                        status_text += (
+                            f"📤 Загрузка: {completed_count}/{total_tracks}\n"
+                            f"🎵 Обработано: {track['artist']} - {track['name']}"
+                        )
+                        await status_msg.edit_text(status_text)
+                    except TelegramBadRequest:
+                        pass
+
+    tasks = [bounded_download(track) for track in tracks]
+    await asyncio.gather(*tasks)
+
+    if failed_count:
+        await status_msg.edit_text(
+            f"⚠️ {collection_type} {collection_name} загружен с ошибками.\n"
+            f"Успешно: {total_tracks - failed_count}/{total_tracks}"
+        )
+    else:
+        await status_msg.edit_text(f"✅ {collection_type} {collection_name} загружен!")
+
+
 async def process_playlist_link(message: types.Message, playlist_id: str):
     """
     Process a Spotify playlist link: fetch tracks and send them concurrently.
     """
     status_msg = await message.answer("🔍 Получаю информацию о плейлисте...")
-    
     try:
         playlist_info = spotify_client.get_playlist_info(playlist_id)
         playlist_name = playlist_info['name']
         total_tracks = playlist_info['total_tracks']
-        
-        await status_msg.edit_text(f"📄 Плейлист: {playlist_name}\n🔢 Треков: {total_tracks}\n🚀 Начинаю загрузку...")
-        
-        tracks = spotify_client.get_playlist_tracks(playlist_id)
-        
-        # Concurrency limit
-        semaphore = asyncio.Semaphore(10)
-        completed_count = 0
-        failed_count = 0
-        
-        async def bounded_download(track):
-            nonlocal completed_count, failed_count
-            async with semaphore:
-                # Upsert track info to DB
-                database.upsert_track(track)
-                success = True
-                try:
-                    # We pass None for status_msg because we manage status centrally
-                    await download_and_send_track(message, track['id'], None)
-                except Exception:
-                    success = False
-                    logging.exception("Failed to download/send track %s", track.get('id'))
-                    # Optional: notify user about specific failure? 
-                    # For now, we just log it to avoid spamming chat
-                finally:
-                    completed_count += 1
-                    if not success:
-                        failed_count += 1
-                    # Update status every 3 tracks or on the last one to reduce API calls
-                    if completed_count % 3 == 0 or completed_count == total_tracks:
-                        try:
-                            await status_msg.edit_text(
-                                f"📄 Плейлист: {playlist_name}\n"
-                                f"📤 Загрузка: {completed_count}/{total_tracks}\n"
-                                f"🎵 Обработано: {track['artist']} - {track['name']}"
-                            )
-                        except TelegramBadRequest:
-                            pass
 
-        tasks = [bounded_download(track) for track in tracks]
-        await asyncio.gather(*tasks)
-
-        if failed_count:
+        if total_tracks > ZIP_THRESHOLD:
+            keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(text="Скачать ZIP", callback_data=f"zip_playlist:{playlist_id}"),
+                    types.InlineKeyboardButton(text="Отправлять по одному",
+                                               callback_data=f"one_by_one_playlist:{playlist_id}")
+                ]
+            ])
             await status_msg.edit_text(
-                f"⚠️ Плейлист {playlist_name} загружен с ошибками.\n"
-                f"Успешно: {total_tracks - failed_count}/{total_tracks}"
+                f"📄 В плейлисте '{playlist_name}' {total_tracks} треков.\n"
+                "Хотите скачать их одним ZIP-архивом?",
+                reply_markup=keyboard
             )
-        else:
-            await status_msg.edit_text(f"✅ Плейлист {playlist_name} загружен!")
-        
+            return
+
+        await status_msg.edit_text(f"📄 Плейлист: {playlist_name}\n🔢 Треков: {total_tracks}\n🚀 Начинаю загрузку...")
+        tracks = spotify_client.get_playlist_tracks(playlist_id)
+        await send_tracks_one_by_one(message, status_msg, tracks, playlist_name, "Плейлист")
+
     except Exception:
         logging.exception("Error processing playlist")
         await message.answer("❌ Произошла ошибка при обработке плейлиста.")
@@ -291,58 +322,32 @@ async def process_album_link(message: types.Message, album_id: str):
     Process a Spotify album link: fetch tracks and send them concurrently.
     """
     status_msg = await message.answer("🔍 Получаю информацию об альбоме...")
-    
     try:
         album_info = spotify_client.get_album_info(album_id)
         album_name = album_info['name']
         artist_name = album_info['artist']
         total_tracks = album_info['total_tracks']
-        
-        await status_msg.edit_text(f"💿 Альбом: {album_name} - {artist_name}\n🔢 Треков: {total_tracks}\n🚀 Начинаю загрузку...")
-        
-        tracks = spotify_client.get_album_tracks(album_id, album_info)
-        
-        # Concurrency limit
-        semaphore = asyncio.Semaphore(10)
-        completed_count = 0
-        failed_count = 0
-        
-        async def bounded_download(track):
-            nonlocal completed_count, failed_count
-            async with semaphore:
-                # Upsert track info to DB
-                database.upsert_track(track)
-                success = True
-                try:
-                    await download_and_send_track(message, track['id'], None)
-                except Exception:
-                    success = False
-                    logging.exception("Failed to download/send track %s", track.get('id'))
-                finally:
-                    completed_count += 1
-                    if not success:
-                        failed_count += 1
-                    if completed_count % 3 == 0 or completed_count == total_tracks:
-                        try:
-                            await status_msg.edit_text(
-                                f"💿 Альбом: {album_name}\n"
-                                f"📤 Загрузка: {completed_count}/{total_tracks}\n"
-                                f"🎵 Обработано: {track['artist']} - {track['name']}"
-                            )
-                        except TelegramBadRequest:
-                            pass
 
-        tasks = [bounded_download(track) for track in tracks]
-        await asyncio.gather(*tasks)
-
-        if failed_count:
+        if total_tracks > ZIP_THRESHOLD:
+            keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(text="Скачать ZIP", callback_data=f"zip_album:{album_id}"),
+                    types.InlineKeyboardButton(text="Отправлять по одному",
+                                               callback_data=f"one_by_one_album:{album_id}")
+                ]
+            ])
             await status_msg.edit_text(
-                f"⚠️ Альбом {album_name} загружен с ошибками.\n"
-                f"Успешно: {total_tracks - failed_count}/{total_tracks}"
+                f"💿 В альбоме '{album_name}' {total_tracks} треков.\n"
+                "Хотите скачать их одним ZIP-архивом?",
+                reply_markup=keyboard
             )
-        else:
-            await status_msg.edit_text(f"✅ Альбом {album_name} загружен!")
-        
+            return
+
+        await status_msg.edit_text(
+            f"💿 Альбом: {album_name} - {artist_name}\n🔢 Треков: {total_tracks}\n🚀 Начинаю загрузку...")
+        tracks = spotify_client.get_album_tracks(album_id, album_info)
+        await send_tracks_one_by_one(message, status_msg, tracks, album_name, "Альбом", artist_name=artist_name)
+
     except Exception:
         logging.exception("Error processing album")
         await message.answer("❌ Произошла ошибка при обработке альбома.")
@@ -350,6 +355,185 @@ async def process_album_link(message: types.Message, album_id: str):
             await status_msg.delete()
         except TelegramBadRequest:
             pass
+
+
+@dp.callback_query(F.data.startswith("one_by_one_playlist:"))
+async def handle_one_by_one_playlist(callback_query: types.CallbackQuery):
+    playlist_id = callback_query.data.split(":")[1]
+    message = callback_query.message
+    status_msg = await message.answer("🚀 Начинаю загрузку треков по одному...")
+
+    try:
+        playlist_info = spotify_client.get_playlist_info(playlist_id)
+        tracks = spotify_client.get_playlist_tracks(playlist_id)
+        await send_tracks_one_by_one(message, status_msg, tracks, playlist_info['name'], "Плейлист")
+    except Exception:
+        logging.exception("Error processing one_by_one_playlist callback")
+        await message.answer("❌ Произошла ошибка.")
+    finally:
+        await callback_query.message.delete()
+
+
+@dp.callback_query(F.data.startswith("zip_playlist:"))
+async def handle_zip_playlist(callback_query: types.CallbackQuery):
+    playlist_id = callback_query.data.split(":")[1]
+    status_msg = callback_query.message
+
+    try:
+        playlist_info = spotify_client.get_playlist_info(playlist_id)
+        tracks = spotify_client.get_playlist_tracks(playlist_id)
+        await download_and_zip_tracks(status_msg, tracks, playlist_info['name'], "Плейлист")
+    except Exception:
+        logging.exception("Error processing zip_playlist callback")
+        await status_msg.edit_text("❌ Произошла ошибка при обработке плейлиста для ZIP.")
+
+
+@dp.callback_query(F.data.startswith("one_by_one_album:"))
+async def handle_one_by_one_album(callback_query: types.CallbackQuery):
+    album_id = callback_query.data.split(":")[1]
+    message = callback_query.message
+    status_msg = await message.answer("🚀 Начинаю загрузку треков по одному...")
+
+    try:
+        album_info = spotify_client.get_album_info(album_id)
+        tracks = spotify_client.get_album_tracks(album_id, album_info)
+        await send_tracks_one_by_one(message, status_msg, tracks, album_info['name'], "Альбом", artist_name=album_info['artist'])
+    except Exception:
+        logging.exception("Error processing one_by_one_album callback")
+        await message.answer("❌ Произошла ошибка.")
+    finally:
+        await callback_query.message.delete()
+
+
+@dp.callback_query(F.data.startswith("zip_album:"))
+async def handle_zip_album(callback_query: types.CallbackQuery):
+    album_id = callback_query.data.split(":")[1]
+    status_msg = callback_query.message
+
+    try:
+        album_info = spotify_client.get_album_info(album_id)
+        tracks = spotify_client.get_album_tracks(album_id, album_info)
+        await download_and_zip_tracks(status_msg, tracks, album_info['name'], "Альбом")
+    except Exception:
+        logging.exception("Error processing zip_album callback")
+        await status_msg.edit_text("❌ Произошла ошибка при обработке альбома для ZIP.")
+
+
+async def download_track_for_zip(track: dict, semaphore: asyncio.Semaphore) -> Path | None:
+    """
+    Downloads a single track for ZIP packaging.
+    """
+    async with semaphore:
+        database.upsert_track(track)
+        track_id = track['id']
+        mp3_path = TRACKS_DIR / f"{track_id}.mp3"
+
+        if mp3_path.exists():
+            return mp3_path
+
+        search_query = f"{track['artist']} - {track['name']} audio"
+        try:
+            youtube_url = await downloader.search_youtube(search_query)
+            if not youtube_url:
+                logging.warning("No YouTube link found for %s", search_query)
+                return None
+
+            # Temporarily disable quota for ZIP downloads
+            return await downloader.download_track(youtube_url, track_id, enforce_quota=False)
+        except Exception:
+            logging.exception("Failed to download track %s for zipping", track_id)
+            return None
+
+
+async def download_and_zip_tracks(
+    status_msg: types.Message,
+    tracks: list,
+    collection_name: str,
+    collection_type: str
+):
+    """
+    Downloads all tracks, zips them, sends the archive, and cleans up.
+    """
+    total_tracks = len(tracks)
+    sanitized_collection_name = re.sub(r'[\/:*?"<>|]', '_', collection_name)
+
+    downloader.pause_quota_enforcement()
+
+    try:
+        await status_msg.edit_text(f"📥 Подготовка к скачиванию {collection_type} '{collection_name}'...")
+
+        semaphore = asyncio.Semaphore(10)
+        completed_count = 0
+
+        async def download_and_update_status(track):
+            nonlocal completed_count
+            path = await download_track_for_zip(track, semaphore)
+            completed_count += 1
+            try:
+                await status_msg.edit_text(
+                    f"📥 Скачиваю {collection_type} '{collection_name}'...\n"
+                    f"({completed_count}/{total_tracks}) {track['artist']} - {track['name']}"
+                )
+            except TelegramBadRequest:  # Message not modified
+                pass
+            return path
+
+        tasks = [download_and_update_status(track) for track in tracks]
+        results = await asyncio.gather(*tasks)
+
+        downloaded_paths = [path for path in results if path]
+        failed_count = total_tracks - len(downloaded_paths)
+
+        if not downloaded_paths:
+            await status_msg.edit_text(f"❌ Не удалось скачать ни одного трека из {collection_type} '{collection_name}'.")
+            return
+
+        await status_msg.edit_text(f"📦 Группирую треки для архивации...")
+
+        # Split tracks into chunks to respect Telegram's file size limit
+        zip_chunks = []
+        current_chunk_size = 0
+        current_chunk = []
+        for path in downloaded_paths:
+            size = path.stat().st_size
+            if current_chunk_size + size > MAX_ZIP_SIZE and current_chunk:
+                zip_chunks.append(current_chunk)
+                current_chunk = []
+                current_chunk_size = 0
+            current_chunk.append(path)
+            current_chunk_size += size
+        if current_chunk:
+            zip_chunks.append(current_chunk)
+
+        for i, chunk in enumerate(zip_chunks):
+            part_num = i + 1
+            zip_filename = f"{sanitized_collection_name} (Часть {part_num}).zip"
+            zip_path = TRACKS_DIR / zip_filename
+
+            await status_msg.edit_text(f"📦 Создаю архив {part_num}/{len(zip_chunks)} для '{collection_name}'...")
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                for track_path in chunk:
+                    zipf.write(track_path, arcname=track_path.name)
+
+            await status_msg.edit_text(f"📤 Отправляю архив {part_num}/{len(zip_chunks)} '{collection_name}'...")
+            await status_msg.answer_document(FSInputFile(zip_path))
+
+            if zip_path.exists():
+                zip_path.unlink()
+
+        if failed_count > 0:
+            await status_msg.edit_text(
+                f"✅ {collection_type} '{collection_name}' отправлен, но {failed_count} из {total_tracks} треков не удалось скачать."
+            )
+        else:
+            await status_msg.edit_text(f"✅ {collection_type} '{collection_name}' успешно скачан и отправлен!")
+
+    except Exception:
+        logging.exception("Error during zipping process")
+        await status_msg.edit_text(f"❌ Произошла ошибка при создании архива для '{collection_name}'.")
+    finally:
+        # Cleanup is now handled by the quota enforcer, so we just resume it.
+        downloader.resume_quota_enforcement()
 
 
 async def download_and_send_track(message: types.Message, track_id: str, status_msg: types.Message | None = None):
