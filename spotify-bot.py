@@ -532,12 +532,7 @@ async def download_and_zip_tracks(
         logging.exception("Error during zipping process")
         await status_msg.edit_text(f"❌ Произошла ошибка при создании архива для '{collection_name}'.")
     finally:
-        # Cleanup
-        for track in tracks:
-            mp3_path = TRACKS_DIR / f"{track['id']}.mp3"
-            if mp3_path.exists():
-                mp3_path.unlink()
-
+        # Cleanup is now handled by the quota enforcer, so we just resume it.
         downloader.resume_quota_enforcement()
 
 
