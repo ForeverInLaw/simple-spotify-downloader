@@ -30,6 +30,16 @@ class Downloader:
             self.max_storage_bytes = 0
         else:
             self.max_storage_bytes = max_storage_mb * 1024 * 1024
+        self._quota_enforcement_paused = False
+
+    def pause_quota_enforcement(self):
+        self._quota_enforcement_paused = True
+        logging.info("Storage quota enforcement paused.")
+
+    def resume_quota_enforcement(self):
+        self._quota_enforcement_paused = False
+        logging.info("Storage quota enforcement resumed.")
+        self._enforce_storage_quota()
 
     def close(self) -> None:
         """Release executor resources."""
@@ -64,7 +74,7 @@ class Downloader:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self.executor, _search)
 
-    async def download_track(self, url: str, track_id: str) -> str:
+    async def download_track(self, url: str, track_id: str, enforce_quota: bool = True) -> Path:
         """
         Download a YouTube audio track as an MP3 file named by track_id into the tracks directory.
         
@@ -73,6 +83,7 @@ class Downloader:
         Parameters:
             url (str): YouTube video URL to download audio from.
             track_id (str): Identifier used as the output filename (file stem, without extension).
+            enforce_quota (bool): If True, run storage quota enforcement.
         
         Returns:
             Path: The filesystem path of the saved MP3 file.
@@ -82,7 +93,8 @@ class Downloader:
         # Check if already exists
         if output_path.exists():
             logging.info(f"Track {track_id} found in cache.")
-            self._enforce_storage_quota()
+            if enforce_quota:
+                self._enforce_storage_quota()
             return output_path
 
         ydl_opts = {
@@ -108,7 +120,8 @@ class Downloader:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(self.executor, _download)
         
-        self._enforce_storage_quota()
+        if enforce_quota:
+            self._enforce_storage_quota()
 
         return output_path
 
@@ -138,7 +151,7 @@ class Downloader:
         
         If no storage limit is configured or the current size is already within the limit, this is a no-op. When the limit is exceeded, the method deletes the oldest MP3 files from TRACKS_DIR in batches of CLEANUP_BATCH, removes their corresponding cover images named {stem}.jpg from COVERS_DIR if present, and calls database.delete_track for each removed track.
         """
-        if not self.max_storage_bytes:
+        if not self.max_storage_bytes or self._quota_enforcement_paused:
             return
 
         total_size = self._directory_size(DOWNLOADS_ROOT)
