@@ -9,6 +9,8 @@ from pathlib import Path
 import aiohttp
 from PIL import Image
 from aiogram import Bot, Dispatcher, types, F
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
 from aiogram.exceptions import TelegramNetworkError, TelegramBadRequest
@@ -65,11 +67,13 @@ def get_optional_int_env(var_name: str) -> int | None:
 
 
 TELEGRAM_API_TOKEN = get_required_env("TELEGRAM_API_TOKEN")
+TELEGRAM_API_URL = os.getenv("TELEGRAM_API_URL")
 SPOTIFY_CLIENT_ID = get_required_env("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = get_required_env("SPOTIFY_CLIENT_SECRET")
 STORAGE_LIMIT_MB = get_optional_int_env("STORAGE_LIMIT_MB")
 ZIP_THRESHOLD = get_optional_int_env("ZIP_THRESHOLD") or 10
-MAX_ZIP_SIZE = 48 * 1024 * 1024  # 48 MB limit for Telegram bots
+MAX_UPLOAD_SIZE_LOCAL_API = 2000 * 1024 * 1024
+MAX_UPLOAD_SIZE_PUBLIC_API = 48 * 1024 * 1024
 
 LOG_FILE = 'logs.txt'
 LOG_MAX_AGE = timedelta(days=1)
@@ -151,7 +155,11 @@ logging.basicConfig(
 )
 
 # Initialize components
-bot = Bot(token=TELEGRAM_API_TOKEN)
+if TELEGRAM_API_URL:
+    session = AiohttpSession(api=TelegramAPIServer.from_base(TELEGRAM_API_URL))
+    bot = Bot(token=TELEGRAM_API_TOKEN, session=session)
+else:
+    bot = Bot(token=TELEGRAM_API_TOKEN)
 dp = Dispatcher()
 spotify_client = SpotifyClient(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
 downloader = Downloader(max_storage_mb=STORAGE_LIMIT_MB)
@@ -494,9 +502,12 @@ async def download_and_zip_tracks(
         zip_chunks = []
         current_chunk_size = 0
         current_chunk = []
+
+        chunk_limit = MAX_UPLOAD_SIZE_LOCAL_API if TELEGRAM_API_URL else MAX_UPLOAD_SIZE_PUBLIC_API
+
         for path in downloaded_paths:
             size = path.stat().st_size
-            if current_chunk_size + size > MAX_ZIP_SIZE and current_chunk:
+            if current_chunk_size + size > chunk_limit and current_chunk:
                 zip_chunks.append(current_chunk)
                 current_chunk = []
                 current_chunk_size = 0
@@ -507,10 +518,13 @@ async def download_and_zip_tracks(
 
         for i, chunk in enumerate(zip_chunks):
             part_num = i + 1
-            zip_filename = f"{sanitized_collection_name} (Часть {part_num}).zip"
+            if len(zip_chunks) > 1:
+                zip_filename = f"{sanitized_collection_name} (Часть {part_num}).zip"
+                await status_msg.edit_text(f"📦 Создаю архив {part_num}/{len(zip_chunks)} для '{collection_name}'...")
+            else:
+                zip_filename = f"{sanitized_collection_name}.zip"
+                await status_msg.edit_text(f"📦 Создаю архив для '{collection_name}'...")
             zip_path = TRACKS_DIR / zip_filename
-
-            await status_msg.edit_text(f"📦 Создаю архив {part_num}/{len(zip_chunks)} для '{collection_name}'...")
             with zipfile.ZipFile(zip_path, 'w') as zipf:
                 for track_path in chunk:
                     zipf.write(track_path, arcname=track_path.name)

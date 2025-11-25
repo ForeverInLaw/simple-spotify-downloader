@@ -1,7 +1,8 @@
 import sqlite3
 import logging
+from pathlib import Path
 
-DB_NAME = 'users.db'
+DB_NAME = Path('data/users.db')
 
 def init_db():
     """
@@ -14,6 +15,7 @@ def init_db():
     If a sqlite3.Error occurs, an error is logged and the function returns without raising.
     """
     try:
+        DB_NAME.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
             cursor.execute('''

@@ -62,6 +62,18 @@ python spotify-bot.py
 
 Send a Spotify track URL (for example, `https://open.spotify.com/track/<id>`) to the Telegram bot. The bot responds with the MP3 file once the download or cache lookup finishes.
 
+## Usage with Docker
+
+To run the bot using Docker, follow these steps:
+
+1. **Install Docker and Docker Compose.**
+2. **Configure your credentials** in the `.env` file, including `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`. You can obtain these from [my.telegram.org](https://my.telegram.org) under "API development tools".
+3. **Run the bot** using Docker Compose:
+   ```bash
+   docker-compose up -d
+   ```
+   This will build the bot's Docker image and start both the bot and the local Telegram Bot API server. The server increases the file upload limit to 2GB.
+
 ## Project Structure
 
 ```text
@@ -75,9 +87,10 @@ yt-dlp.conf        # yt-dlp runtime configuration
 
 ## Roadmap
 
-1. Playlist downloads
-2. Text-based song search (without Spotify links)
-3. Docker support
+1. [Ready] Playlist downloads
+2. [Ready] Docker support
+3. Text-based song search (without Spotify links)
+
 
 ## License
 
