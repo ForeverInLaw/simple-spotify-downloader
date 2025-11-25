@@ -69,6 +69,7 @@ SPOTIFY_CLIENT_ID = get_required_env("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = get_required_env("SPOTIFY_CLIENT_SECRET")
 STORAGE_LIMIT_MB = get_optional_int_env("STORAGE_LIMIT_MB")
 ZIP_THRESHOLD = get_optional_int_env("ZIP_THRESHOLD") or 10
+MAX_ZIP_SIZE = 48 * 1024 * 1024  # 48 MB limit for Telegram bots
 
 LOG_FILE = 'logs.txt'
 LOG_MAX_AGE = timedelta(days=1)
@@ -455,8 +456,6 @@ async def download_and_zip_tracks(
     """
     total_tracks = len(tracks)
     sanitized_collection_name = re.sub(r'[\/:*?"<>|]', '_', collection_name)
-    zip_filename = f"{sanitized_collection_name}.zip"
-    zip_path = TRACKS_DIR / zip_filename
 
     downloader.pause_quota_enforcement()
 
@@ -464,8 +463,22 @@ async def download_and_zip_tracks(
         await status_msg.edit_text(f"📥 Подготовка к скачиванию {collection_type} '{collection_name}'...")
 
         semaphore = asyncio.Semaphore(10)
+        completed_count = 0
 
-        tasks = [download_track_for_zip(track, semaphore) for track in tracks]
+        async def download_and_update_status(track):
+            nonlocal completed_count
+            path = await download_track_for_zip(track, semaphore)
+            completed_count += 1
+            try:
+                await status_msg.edit_text(
+                    f"📥 Скачиваю {collection_type} '{collection_name}'...\n"
+                    f"({completed_count}/{total_tracks}) {track['artist']} - {track['name']}"
+                )
+            except TelegramBadRequest:  # Message not modified
+                pass
+            return path
+
+        tasks = [download_and_update_status(track) for track in tracks]
         results = await asyncio.gather(*tasks)
 
         downloaded_paths = [path for path in results if path]
@@ -475,14 +488,38 @@ async def download_and_zip_tracks(
             await status_msg.edit_text(f"❌ Не удалось скачать ни одного трека из {collection_type} '{collection_name}'.")
             return
 
-        await status_msg.edit_text(f"📦 Создаю ZIP-архив для '{collection_name}'...")
+        await status_msg.edit_text(f"📦 Группирую треки для архивации...")
 
-        with zipfile.ZipFile(zip_path, 'w') as zipf:
-            for track_path in downloaded_paths:
-                zipf.write(track_path, arcname=track_path.name)
+        # Split tracks into chunks to respect Telegram's file size limit
+        zip_chunks = []
+        current_chunk_size = 0
+        current_chunk = []
+        for path in downloaded_paths:
+            size = path.stat().st_size
+            if current_chunk_size + size > MAX_ZIP_SIZE and current_chunk:
+                zip_chunks.append(current_chunk)
+                current_chunk = []
+                current_chunk_size = 0
+            current_chunk.append(path)
+            current_chunk_size += size
+        if current_chunk:
+            zip_chunks.append(current_chunk)
 
-        await status_msg.edit_text(f"📤 Отправляю ZIP-архив '{collection_name}'...")
-        await status_msg.answer_document(FSInputFile(zip_path))
+        for i, chunk in enumerate(zip_chunks):
+            part_num = i + 1
+            zip_filename = f"{sanitized_collection_name} (Часть {part_num}).zip"
+            zip_path = TRACKS_DIR / zip_filename
+
+            await status_msg.edit_text(f"📦 Создаю архив {part_num}/{len(zip_chunks)} для '{collection_name}'...")
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                for track_path in chunk:
+                    zipf.write(track_path, arcname=track_path.name)
+
+            await status_msg.edit_text(f"📤 Отправляю архив {part_num}/{len(zip_chunks)} '{collection_name}'...")
+            await status_msg.answer_document(FSInputFile(zip_path))
+
+            if zip_path.exists():
+                zip_path.unlink()
 
         if failed_count > 0:
             await status_msg.edit_text(
@@ -496,8 +533,6 @@ async def download_and_zip_tracks(
         await status_msg.edit_text(f"❌ Произошла ошибка при создании архива для '{collection_name}'.")
     finally:
         # Cleanup
-        if zip_path.exists():
-            zip_path.unlink()
         for track in tracks:
             mp3_path = TRACKS_DIR / f"{track['id']}.mp3"
             if mp3_path.exists():
