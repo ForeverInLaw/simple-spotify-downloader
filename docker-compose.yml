@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  telegram-bot-api:
+    image: evilfreelancer/docker-telegram-bot-api:latest
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - TELEGRAM_LOCAL=true
+    volumes:
+      - ./telegram-bot-api_data:/var/lib/telegram-bot-api
+    ports:
+      - "8081:8081"
+
+  spotify-bot:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - telegram-bot-api
+    volumes:
+      - ./tracks:/app/tracks
+      - ./covers:/app/covers
+      - ./database.db:/app/database.db
+    env_file:
+      - .env
